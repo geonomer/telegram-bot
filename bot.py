@@ -760,7 +760,30 @@ if __name__ == '__main__':
     print("🧪 Тест: /test")
     print("📊 Статистика: /stats")
     print("=" * 50)
-    
 
+    # --- Запускаем Flask в отдельном потоке ПОСЛЕ бота ---
+    import threading
+    from flask import Flask
+    import os
+    import time
+
+    flask_app = Flask(__name__)
+
+    @flask_app.route('/')
+    @flask_app.route('/health')
+    def health():
+        return "Bot is running!", 200
+
+    def run_flask():
+        port = int(os.environ.get('PORT', 10000))
+        print(f"🚀 Запуск Flask health check на порту {port}...")
+        flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
+    # Запускаем Flask в фоновом потоке
+    threading.Thread(target=run_flask, daemon=True).start()
+    time.sleep(2)  # Даём серверу время на запуск
+    print("✅ Flask health check запущен, стартуем бота...")
+    # ------------------------------------------------
+
+    # Запускаем бота (эта строка уже должна быть)
     executor.start_polling(dp, skip_updates=True)
-
