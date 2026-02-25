@@ -1,6 +1,7 @@
 aiogram==2.25.1
 pyrogram==2.0.106
-tgcrypto
+cryptg
 requests
 aiohttp
+
 cachetools
