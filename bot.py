@@ -1,4 +1,24 @@
 # -*- coding: utf-8 -*-
+import threading
+from flask import Flask
+import os
+
+# --- Простой Flask-сервер для Render ---
+app = Flask(__name__)
+
+@app.route('/')
+@app.route('/health')
+def health():
+    return "Bot is running!", 200
+
+def run_flask():
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
+# Запускаем Flask в отдельном потоке
+threading.Thread(target=run_flask, daemon=True).start()
+# -----------------------------------------
+
 import asyncio
 import random
 import string
@@ -733,4 +753,5 @@ if __name__ == '__main__':
     print("📊 Статистика: /stats")
     print("=" * 50)
     
+
     executor.start_polling(dp, skip_updates=True)
