@@ -223,7 +223,7 @@ accounts = {
         "session_file": "sessions/account_2",
         "in_use": False,
         "current_user": None,
-        "description": "Аккаунт USA, верифицирован"
+        "description": "Аккаунт USA, чистый, прогретый"
     },
     "3": {
         "phone": "+15399999864",
@@ -234,7 +234,7 @@ accounts = {
         "session_file": "sessions/account_3",
         "in_use": False,
         "current_user": None,
-        "description": "Аккаунт USA, для теста"
+        "description": "Аккаунт USA, чистый, прогретый"
     }
 }
 
@@ -762,3 +762,4 @@ if __name__ == '__main__':
     print("=" * 50)
     
     executor.start_polling(dp, skip_updates=True)
+
