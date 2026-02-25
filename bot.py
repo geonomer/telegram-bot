@@ -2,6 +2,7 @@
 import threading
 from flask import Flask
 import os
+import time
 
 # --- Простой Flask-сервер для Render ---
 app = Flask(__name__)
@@ -13,16 +14,21 @@ def health():
 
 def run_flask():
     port = int(os.environ.get('PORT', 10000))
+    # Важно: host='0.0.0.0' и порт из переменной окружения
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
-# Запускаем Flask в отдельном потоке
+# Запускаем Flask в отдельном потоке (daemon=True позволит ему завершиться вместе с ботом)
+print("🚀 Запуск Flask-сервера для Render...")
 threading.Thread(target=run_flask, daemon=True).start()
+# Даём серверу секунду на запуск, чтобы он точно начал слушать порт
+time.sleep(1)
+print("✅ Flask-сервер запущен, продолжаю загрузку бота...")
 # -----------------------------------------
 
+# ДАЛЕЕ ИДУТ ТВОИ ОСТАЛЬНЫЕ ИМПОРТЫ
 import asyncio
 import random
 import string
-import os
 import re
 import sqlite3
 import atexit
@@ -33,6 +39,8 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMar
 from aiogram.types import LabeledPrice, PreCheckoutQuery, SuccessfulPayment
 from pyrogram import Client
 from pyrogram.errors import PhoneNumberInvalid
+
+# ... (весь остальной твой код идёт следом) ...
 
 # ================== НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ==================
 TOKEN = os.environ.get('TOKEN', "8054814092:AAEVkB2fThqWSL_fwoNFZ7oQ7Dtjwr4wNt0")
@@ -755,3 +763,4 @@ if __name__ == '__main__':
     
 
     executor.start_polling(dp, skip_updates=True)
+
