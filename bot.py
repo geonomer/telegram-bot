@@ -1,34 +1,8 @@
 # -*- coding: utf-8 -*-
-import threading
-from flask import Flask
-import os
-import time
-
-# --- Простой Flask-сервер для Render ---
-app = Flask(__name__)
-
-@app.route('/')
-@app.route('/health')
-def health():
-    return "Bot is running!", 200
-
-def run_flask():
-    port = int(os.environ.get('PORT', 10000))
-    # Важно: host='0.0.0.0' и порт из переменной окружения
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-
-# Запускаем Flask в отдельном потоке (daemon=True позволит ему завершиться вместе с ботом)
-print("🚀 Запуск Flask-сервера для Render...")
-threading.Thread(target=run_flask, daemon=True).start()
-# Даём серверу секунду на запуск, чтобы он точно начал слушать порт
-time.sleep(1)
-print("✅ Flask-сервер запущен, продолжаю загрузку бота...")
-# -----------------------------------------
-
-# ДАЛЕЕ ИДУТ ТВОИ ОСТАЛЬНЫЕ ИМПОРТЫ
 import asyncio
 import random
 import string
+import os
 import re
 import sqlite3
 import atexit
@@ -40,13 +14,9 @@ from aiogram.types import LabeledPrice, PreCheckoutQuery, SuccessfulPayment
 from pyrogram import Client
 from pyrogram.errors import PhoneNumberInvalid
 
-# ... (весь остальной твой код идёт следом) ...
-
-# ================== НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ==================
-TOKEN = os.environ.get('TOKEN', "8054814092:AAEVkB2fThqWSL_fwoNFZ7oQ7Dtjwr4wNt0")
-ADMIN_ID = int(os.environ.get('ADMIN_ID', 5019414179))
-API_ID = int(os.environ.get('API_ID', 37379476))
-API_HASH = os.environ.get('API_HASH', "67cf40314dc0f31534b4b7feeae39242")
+# ================== НАСТРОЙКИ ==================
+TOKEN = "8054814092:AAEVkB2fThqWSL_fwoNFZ7oQ7Dtjwr4wNt0"
+ADMIN_ID = 5019414179
 
 PRICE_STARS = 149
 DISCOUNT_STARS = 50
@@ -237,8 +207,8 @@ accounts = {
         "phone": "+16188550568",
         "country": "us",
         "country_name": "США",
-        "api_id": API_ID,
-        "api_hash": API_HASH,
+        "api_id": 37379476,
+        "api_hash": "67cf40314dc0f31534b4b7feeae39242",
         "session_file": "sessions/account_1",
         "in_use": False,
         "current_user": None,
@@ -248,23 +218,23 @@ accounts = {
         "phone": "+15593721842",
         "country": "us",
         "country_name": "США",
-        "api_id": API_ID,
-        "api_hash": API_HASH,
+        "api_id": 37379476,
+        "api_hash": "67cf40314dc0f31534b4b7feeae39242",
         "session_file": "sessions/account_2",
         "in_use": False,
         "current_user": None,
-        "description": "Аккаунт USA, чистый, прогретый"
+        "description": "Аккаунт USA, верифицирован"
     },
     "3": {
         "phone": "+15399999864",
         "country": "us",
         "country_name": "США",
-        "api_id": API_ID,
-        "api_hash": API_HASH,
+        "api_id": 37379476,
+        "api_hash": "67cf40314dc0f31534b4b7feeae39242",
         "session_file": "sessions/account_3",
         "in_use": False,
         "current_user": None,
-        "description": "Аккаунт USA, чистый, прогретый"
+        "description": "Аккаунт USA, для теста"
     }
 }
 
@@ -288,9 +258,13 @@ def calculate_stars_price(user_id):
 class CodeGetter:
     def __init__(self, session_file):
         self.session_file = session_file
+        print(f"✅ CodeGetter готов для {session_file}")
     
     async def get_code(self, phone, api_id, api_hash):
+        """Получает код из чата с Telegram"""
         try:
+            print(f"🔄 Подключаюсь к {phone}...")
+            
             app = Client(
                 name=self.session_file,
                 api_id=api_id,
@@ -298,22 +272,48 @@ class CodeGetter:
             )
             
             await app.start()
+            print(f"✅ Успешно подключился!")
             
-            # Ищем чат с Telegram
+            # Получаем информацию об аккаунте
+            me = await app.get_me()
+            print(f"👤 Аккаунт: {me.first_name}")
+            
+            # Ищем диалог с Telegram
+            print("🔍 Ищу диалог с Telegram...")
+            telegram_chat_id = None
+            
             async for dialog in app.get_dialogs():
-                if dialog.chat.first_name and "telegram" in dialog.chat.first_name.lower():
-                    async for msg in app.get_chat_history(dialog.chat.id, limit=10):
-                        if msg.text:
-                            code = re.search(r'(\d{5})', msg.text)
-                            if code:
-                                await app.stop()
-                                return code.group(1)
-                    break
+                chat = dialog.chat
+                if chat.type.value == "private":
+                    chat_name = (chat.first_name or "").lower()
+                    if "telegram" in chat_name:
+                        telegram_chat_id = chat.id
+                        print(f"✅ Найден чат: {chat.first_name}")
+                        break
             
+            if not telegram_chat_id:
+                print("❌ Чат Telegram не найден")
+                await app.stop()
+                return None
+            
+            # Читаем последние сообщения
+            print(f"📨 Читаю сообщения...")
+            async for msg in app.get_chat_history(telegram_chat_id, limit=20):
+                if msg and msg.text:
+                    print(f"📩 {msg.text[:100]}")
+                    code_match = re.search(r'(\d{5})', msg.text)
+                    if code_match:
+                        code = code_match.group(1)
+                        print(f"✅ НАЙДЕН КОД: {code}")
+                        await app.stop()
+                        return code
+            
+            print("❌ Код не найден")
             await app.stop()
             return None
+            
         except Exception as e:
-            print(f"Ошибка: {e}")
+            print(f"❌ Ошибка: {e}")
             return None
 
 # ================== КЛАВИАТУРЫ ==================
@@ -333,7 +333,7 @@ def get_numbers_keyboard():
                 f"{flag} {acc['phone']} — {acc['description'][:20]}...", 
                 callback_data=f"num_{num}"
             ))
-    kb.add(InlineKeyboardButton("◀ Назад", callback_data="back"))
+    kb.add(InlineKeyboardButton("◀ Назад в меню", callback_data="back"))
     return kb
 
 def get_code_keyboard(number):
@@ -659,8 +659,8 @@ async def get_code_callback(call: types.CallbackQuery):
     
     await call.message.answer(f"{EMOJI['wait']} *Ищу код для {account['phone']}...*", parse_mode="Markdown")
     
-    getter = CodeGetter(account['session_file'])
-    code = await getter.get_code(account['phone'], account['api_id'], account['api_hash'])
+    code_getter = CodeGetter(account['session_file'])
+    code = await code_getter.get_code(account['phone'], account['api_id'], account['api_hash'])
     
     if code:
         await call.message.answer(
@@ -758,32 +758,7 @@ if __name__ == '__main__':
     print(f"💰 Цена: {PRICE_STARS}⭐")
     print(f"📱 Аккаунтов: {len(accounts)}")
     print("🧪 Тест: /test")
-    print("📊 Статистика: /stats")
+    print("👑 Режим админа: БЕСПЛАТНО")
     print("=" * 50)
-
-    # --- Запускаем Flask в отдельном потоке ПОСЛЕ бота ---
-    import threading
-    from flask import Flask
-    import os
-    import time
-
-    flask_app = Flask(__name__)
-
-    @flask_app.route('/')
-    @flask_app.route('/health')
-    def health():
-        return "Bot is running!", 200
-
-    def run_flask():
-        port = int(os.environ.get('PORT', 10000))
-        print(f"🚀 Запуск Flask health check на порту {port}...")
-        flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-
-    # Запускаем Flask в фоновом потоке
-    threading.Thread(target=run_flask, daemon=True).start()
-    time.sleep(2)  # Даём серверу время на запуск
-    print("✅ Flask health check запущен, стартуем бота...")
-    # ------------------------------------------------
-
-    # Запускаем бота (эта строка уже должна быть)
+    
     executor.start_polling(dp, skip_updates=True)
