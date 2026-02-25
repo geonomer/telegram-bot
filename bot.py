@@ -6,6 +6,27 @@ import os
 import re
 import sqlite3
 import atexit
+import base64
+import os
+
+def restore_sessions():
+    """Восстанавливает файлы сессий из переменных окружения"""
+    os.makedirs("sessions", exist_ok=True)
+    
+    for i in range(1, 4):
+        session_data = os.environ.get(f'SESSION_{i}')
+        if session_data:
+            try:
+                # Убираем лишние переносы строк из base64
+                session_data = session_data.replace('\n', '').replace('\r', '')
+                with open(f'sessions/account_{i}.session', 'wb') as f:
+                    f.write(base64.b64decode(session_data))
+                print(f"✅ Восстановлена сессия account_{i}")
+            except Exception as e:
+                print(f"❌ Ошибка восстановления session_{i}: {e}")
+
+# Вызови функцию сразу после создания папок
+restore_sessions()
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
@@ -762,4 +783,5 @@ if __name__ == '__main__':
     print("=" * 50)
     
     executor.start_polling(dp, skip_updates=True)
+
 
