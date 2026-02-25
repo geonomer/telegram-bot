@@ -8,6 +8,23 @@ import sqlite3
 import atexit
 import base64
 import os
+import requests
+import threading
+import time
+
+def self_ping():
+    """Пингует самого себя каждые 10 минут"""
+    url = os.environ.get('RENDER_EXTERNAL_URL', 'https://telegram-bot.onrender.com')
+    while True:
+        try:
+            requests.get(f"{url}/health", timeout=5)
+            print(f"✅ Self-ping successful at {time.strftime('%H:%M:%S')}")
+        except Exception as e:
+            print(f"❌ Self-ping failed: {e}")
+        time.sleep(600)  # 10 минут
+
+# Запусти это после Flask сервера
+threading.Thread(target=self_ping, daemon=True).start()
 
 def restore_sessions():
     """Восстанавливает файлы сессий из переменных окружения"""
@@ -783,5 +800,6 @@ if __name__ == '__main__':
     print("=" * 50)
     
     executor.start_polling(dp, skip_updates=True)
+
 
 
