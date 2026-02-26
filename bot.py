@@ -801,4 +801,28 @@ async def stats(message: types.Message):
     sold = sum(1 for acc in accounts.values() if acc["in_use"])
     
     await message.answer(
-        f"{EMOJI['chart']} *СТ
+        f"{EMOJI['chart']} *СТАТИСТИКА*\n\n"
+        f"{EMOJI['unlock']} Доступно: {available}\n"
+        f"{EMOJI['lock']} Продано: {sold}\n"
+        f"👥 Пользователей: {stats['total_users']}\n"
+        f"👥 Рефералов: {stats['total_refs']}\n"
+        f"💰 Продаж: {stats['total_purchases']}\n"
+        f"💎 Всего звезд: {stats['total_revenue']}⭐",
+        parse_mode="Markdown"
+    )
+
+# ================== ЗАКРЫТИЕ БАЗЫ ==================
+atexit.register(db.close)
+
+# ================== ЗАПУСК ==================
+if __name__ == '__main__':
+    print("=" * 50)
+    print("✅ БОТ ЗАПУЩЕН!")
+    print("=" * 50)
+    print(f"💰 Цена: {PRICE_STARS}⭐")
+    print(f"📱 Аккаунтов: {len(accounts)}")
+    print("🧪 Тест: /test")
+    print("👑 Режим админа: БЕСПЛАТНО")
+    print("=" * 50)
+    
+    executor.start_polling(dp, skip_updates=True)
