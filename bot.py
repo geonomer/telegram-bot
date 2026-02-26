@@ -10,6 +10,8 @@ import base64
 import requests
 import threading
 import time
+import shutil
+import tempfile
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
@@ -18,6 +20,19 @@ from aiogram.types import LabeledPrice, PreCheckoutQuery, SuccessfulPayment
 from pyrogram import Client
 from pyrogram.errors import PhoneNumberInvalid, AuthKeyUnregistered, FloodWait
 from pyrogram.enums import ChatType
+
+# ================== НАСТРОЙКА БАЗЫ ДАННЫХ ДЛЯ RENDER ==================
+def setup_database():
+    """Настраивает базу данных для работы на Render"""
+    os.makedirs("data", exist_ok=True)
+    db_path = "data/bot.db"
+    if os.path.exists(db_path):
+        print(f"✅ База данных найдена: {db_path}")
+    else:
+        print(f"🆕 База данных будет создана: {db_path}")
+    return db_path
+
+setup_database()
 
 # ================== ФУНКЦИИ ВОССТАНОВЛЕНИЯ ==================
 def restore_sessions():
@@ -29,18 +44,40 @@ def restore_sessions():
         session_data = os.environ.get(f'SESSION_{i}')
         if session_data:
             try:
-                # Убираем лишние переносы строк из base64
                 session_data = session_data.replace('\n', '').replace('\r', '').strip()
                 file_path = f'sessions/account_{i}.session'
+                decoded = base64.b64decode(session_data)
                 with open(file_path, 'wb') as f:
-                    f.write(base64.b64decode(session_data))
-                print(f"✅ Восстановлена сессия account_{i}")
+                    f.write(decoded)
+                size = os.path.getsize(file_path)
+                print(f"✅ Восстановлена сессия account_{i} ({size} байт)")
                 restored += 1
             except Exception as e:
                 print(f"❌ Ошибка восстановления session_{i}: {e}")
     
     print(f"✅ Восстановлено {restored} сессий")
     return restored
+
+def check_sessions():
+    """Проверяет наличие и валидность файлов сессий"""
+    print("\n🔍 ПРОВЕРКА СЕССИЙ:")
+    os.makedirs("sessions", exist_ok=True)
+    
+    try:
+        files = os.listdir("sessions")
+        print(f"📁 Файлов в папке sessions: {len(files)}")
+        for f in files:
+            file_path = os.path.join("sessions", f)
+            size = os.path.getsize(file_path)
+            print(f"  - {f} ({size} байт)")
+    except Exception as e:
+        print(f"❌ Ошибка при проверке папки sessions: {e}")
+    
+    print("=" * 50)
+
+# Вызываем проверки
+restore_sessions()
+check_sessions()
 
 # ================== ФУНКЦИЯ ПИНГА ==================
 def self_ping():
@@ -53,14 +90,12 @@ def self_ping():
                 print(f"✅ Self-ping successful at {time.strftime('%H:%M:%S')} - {response.status_code}")
             except Exception as e:
                 print(f"❌ Self-ping failed: {e}")
-            time.sleep(600)  # 10 минут
+            time.sleep(600)
     
     thread = threading.Thread(target=ping, daemon=True)
     thread.start()
     print("✅ Self-ping thread started")
 
-# Вызываем восстановление сессий сразу
-restore_sessions()
 self_ping()
 
 # ================== НАСТРОЙКИ ==================
@@ -102,20 +137,29 @@ os.makedirs("data", exist_ok=True)
 # ================== БАЗА ДАННЫХ SQLITE ==================
 class Database:
     def __init__(self):
-        self.conn = sqlite3.connect('data/bot.db', check_same_thread=False)
-        self.cursor = self.conn.cursor()
+        self.db_path = "data/bot.db"
+        self.conn = None
+        self.cursor = None
+        self.connect()
         self.create_tables()
         print("✅ База данных SQLite инициализирована")
     
+    def connect(self):
+        """Подключается к базе данных"""
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.cursor = self.conn.cursor()
+    
     def create_tables(self):
+        """Создает таблицы, если их нет"""
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 ref_code TEXT UNIQUE,
                 ref_count INTEGER DEFAULT 0,
                 discount INTEGER DEFAULT 0,
-                discount_used BOOLEAN DEFAULT 0,
-                discount_given BOOLEAN DEFAULT 0,
+                discount_used INTEGER DEFAULT 0,
+                discount_given INTEGER DEFAULT 0,
                 join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -145,12 +189,16 @@ class Database:
         self.conn.commit()
     
     def add_user(self, user_id):
+        """Добавляет нового пользователя с уникальным реферальным кодом"""
         try:
-            while True:
+            max_attempts = 10
+            for attempt in range(max_attempts):
                 ref_code = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
                 self.cursor.execute("SELECT user_id FROM users WHERE ref_code = ?", (ref_code,))
                 if not self.cursor.fetchone():
                     break
+            else:
+                ref_code = f"user_{user_id}"
             
             self.cursor.execute('''
                 INSERT OR IGNORE INTO users (user_id, ref_code)
@@ -159,28 +207,34 @@ class Database:
             self.conn.commit()
             return True
         except Exception as e:
-            print(f"Ошибка добавления пользователя: {e}")
+            print(f"Ошибка добавления пользователя {user_id}: {e}")
             return False
     
     def get_user(self, user_id):
-        self.cursor.execute('''
-            SELECT user_id, ref_code, ref_count, discount, discount_used, discount_given
-            FROM users WHERE user_id = ?
-        ''', (user_id,))
-        row = self.cursor.fetchone()
+        """Получает данные пользователя"""
+        try:
+            self.cursor.execute('''
+                SELECT user_id, ref_code, ref_count, discount, discount_used, discount_given
+                FROM users WHERE user_id = ?
+            ''', (user_id,))
+            row = self.cursor.fetchone()
+            
+            if row:
+                return {
+                    "user_id": row[0],
+                    "ref_code": row[1],
+                    "ref_count": row[2],
+                    "discount": row[3],
+                    "discount_used": bool(row[4]),
+                    "discount_given": bool(row[5])
+                }
+        except Exception as e:
+            print(f"Ошибка получения пользователя {user_id}: {e}")
         
-        if row:
-            return {
-                "user_id": row[0],
-                "ref_code": row[1],
-                "ref_count": row[2],
-                "discount": row[3],
-                "discount_used": bool(row[4]),
-                "discount_given": bool(row[5])
-            }
         return None
     
     def add_referral(self, referrer_id, referred_id):
+        """Добавляет реферала и обновляет счетчик"""
         try:
             self.cursor.execute("SELECT id FROM referrals WHERE referred_id = ?", (referred_id,))
             if self.cursor.fetchone():
@@ -203,14 +257,16 @@ class Database:
             self.cursor.execute('''
                 SELECT ref_count FROM users WHERE user_id = ?
             ''', (referrer_id,))
-            ref_count = self.cursor.fetchone()[0]
-            
-            if ref_count >= 5:
-                self.cursor.execute('''
-                    UPDATE users 
-                    SET discount = ?, discount_given = 1 
-                    WHERE user_id = ? AND discount_given = 0
-                ''', (DISCOUNT_STARS, referrer_id))
+            ref_count_row = self.cursor.fetchone()
+            if ref_count_row:
+                ref_count = ref_count_row[0]
+                
+                if ref_count >= 5:
+                    self.cursor.execute('''
+                        UPDATE users 
+                        SET discount = ?, discount_given = 1 
+                        WHERE user_id = ? AND discount_given = 0
+                    ''', (DISCOUNT_STARS, referrer_id))
             
             self.conn.commit()
             return True
@@ -219,6 +275,7 @@ class Database:
             return False
     
     def add_purchase(self, user_id, account_number, phone, price):
+        """Добавляет запись о покупке"""
         try:
             self.cursor.execute('''
                 INSERT INTO purchases (user_id, account_number, phone, price)
@@ -229,28 +286,63 @@ class Database:
             print(f"Ошибка добавления покупки: {e}")
     
     def use_discount(self, user_id):
-        self.cursor.execute('''
-            UPDATE users SET discount_used = 1 WHERE user_id = ?
-        ''', (user_id,))
-        self.conn.commit()
+        """Помечает скидку как использованную"""
+        try:
+            self.cursor.execute('''
+                UPDATE users SET discount_used = 1 WHERE user_id = ?
+            ''', (user_id,))
+            self.conn.commit()
+        except Exception as e:
+            print(f"Ошибка использования скидки: {e}")
     
     def get_stats(self):
+        """Получает общую статистику"""
         stats = {}
-        self.cursor.execute("SELECT COUNT(*) FROM users")
-        stats['total_users'] = self.cursor.fetchone()[0]
-        self.cursor.execute("SELECT COUNT(*) FROM referrals")
-        stats['total_refs'] = self.cursor.fetchone()[0]
-        self.cursor.execute("SELECT COUNT(*) FROM purchases")
-        stats['total_purchases'] = self.cursor.fetchone()[0]
-        self.cursor.execute("SELECT SUM(price) FROM purchases")
-        total = self.cursor.fetchone()[0]
-        stats['total_revenue'] = total if total else 0
+        try:
+            self.cursor.execute("SELECT COUNT(*) FROM users")
+            stats['total_users'] = self.cursor.fetchone()[0]
+            
+            self.cursor.execute("SELECT COUNT(*) FROM referrals")
+            stats['total_refs'] = self.cursor.fetchone()[0]
+            
+            self.cursor.execute("SELECT COUNT(*) FROM purchases")
+            stats['total_purchases'] = self.cursor.fetchone()[0]
+            
+            self.cursor.execute("SELECT SUM(price) FROM purchases")
+            total = self.cursor.fetchone()[0]
+            stats['total_revenue'] = total if total else 0
+        except Exception as e:
+            print(f"Ошибка получения статистики: {e}")
+            stats = {'total_users': 0, 'total_refs': 0, 'total_purchases': 0, 'total_revenue': 0}
+        
         return stats
     
     def close(self):
-        self.conn.close()
+        """Закрывает соединение с базой"""
+        if self.conn:
+            self.conn.close()
+            print("✅ База данных закрыта")
 
 db = Database()
+
+# ================== ПРОВЕРКА БАЗЫ ДАННЫХ ==================
+def verify_database():
+    """Проверяет целостность базы данных"""
+    print("\n🔍 ПРОВЕРКА БАЗЫ ДАННЫХ:")
+    
+    if os.path.exists("data/bot.db"):
+        size = os.path.getsize("data/bot.db")
+        print(f"✅ Файл базы данных найден: data/bot.db ({size} байт)")
+    else:
+        print("❌ Файл базы данных не найден, будет создан новый")
+    
+    if os.path.exists("data/bot.db.backup"):
+        size = os.path.getsize("data/bot.db.backup")
+        print(f"✅ Резервная копия найдена: data/bot.db.backup ({size} байт)")
+    
+    print("=" * 50)
+
+verify_database()
 
 # ================== БАЗА АККАУНТОВ ==================
 accounts = {
@@ -316,46 +408,47 @@ class CodeGetter:
         try:
             print(f"🔄 Подключаюсь к {phone}...")
             
-            # Проверяем существование файла сессии
-            if not os.path.exists(f"{self.session_file}.session"):
-                print(f"❌ Файл сессии {self.session_file}.session не найден")
+            session_path = f"{self.session_file}.session"
+            if not os.path.exists(session_path):
+                print(f"❌ Файл сессии {session_path} не найден")
                 return None
+            
+            print(f"✅ Файл сессии найден: {session_path}")
             
             app = Client(
                 name=self.session_file,
                 api_id=api_id,
                 api_hash=api_hash,
-                in_memory=False
+                workdir="."
             )
             
             try:
+                print("🔄 Попытка подключения...")
                 await app.start()
                 print(f"✅ Успешно подключился!")
             except Exception as e:
                 print(f"❌ Ошибка подключения: {e}")
                 return None
             
-            # Получаем информацию об аккаунте
             try:
                 me = await app.get_me()
-                print(f"👤 Аккаунт: {me.first_name} (@{me.username})")
-            except:
-                print("❌ Не удалось получить информацию об аккаунте")
+                print(f"👤 Аккаунт: {me.first_name} (ID: {me.id})")
+            except Exception as e:
+                print(f"❌ Не удалось получить информацию об аккаунте: {e}")
                 await app.stop()
                 return None
             
-            # Ищем диалог с Telegram
             print("🔍 Ищу диалог с Telegram...")
             telegram_chat_id = None
             
             try:
                 async for dialog in app.get_dialogs(limit=50):
                     chat = dialog.chat
-                    if chat.type == ChatType.PRIVATE:
-                        chat_name = (chat.first_name or "").lower()
+                    if chat.first_name:
+                        chat_name = chat.first_name.lower()
                         if "telegram" in chat_name:
                             telegram_chat_id = chat.id
-                            print(f"✅ Найден чат: {chat.first_name}")
+                            print(f"✅ Найден чат Telegram: {chat.first_name}")
                             break
             except Exception as e:
                 print(f"❌ Ошибка при получении диалогов: {e}")
@@ -367,12 +460,14 @@ class CodeGetter:
                 await app.stop()
                 return None
             
-            # Читаем последние сообщения
-            print(f"📨 Читаю последние 20 сообщений...")
+            print(f"📨 Читаю последние сообщения...")
+            messages_found = 0
+            
             try:
                 async for msg in app.get_chat_history(telegram_chat_id, limit=20):
+                    messages_found += 1
                     if msg and msg.text:
-                        print(f"📩 {msg.text[:100]}")
+                        print(f"📩 [{messages_found}] {msg.text[:100]}")
                         code_match = re.search(r'(\d{5})', msg.text)
                         if code_match:
                             code = code_match.group(1)
@@ -382,7 +477,7 @@ class CodeGetter:
             except Exception as e:
                 print(f"❌ Ошибка при чтении истории: {e}")
             
-            print("❌ Код не найден в последних сообщениях")
+            print(f"📨 Проверено {messages_found} сообщений, код не найден")
             await app.stop()
             return None
             
@@ -565,7 +660,6 @@ async def process_number(call: types.CallbackQuery):
         f"{EMOJI['payment']} *Нажми кнопку ниже для оплаты*"
     )
     
-    # БЕСПЛАТНО ДЛЯ АДМИНА
     if user_id == ADMIN_ID:
         account["in_use"] = True
         account["current_user"] = user_id
@@ -593,7 +687,6 @@ async def process_number(call: types.CallbackQuery):
         await call.answer("✅ Бесплатный тест-режим активирован")
         return
     
-    # ДЛЯ ОБЫЧНЫХ ПОЛЬЗОВАТЕЛЕЙ
     keyboard = InlineKeyboardMarkup(row_width=1)
     keyboard.add(InlineKeyboardButton(
         f"{EMOJI['payment']} Оплатить {price}⭐", 
@@ -811,7 +904,18 @@ async def stats(message: types.Message):
         parse_mode="Markdown"
     )
 
+# ================== РЕЗЕРВНОЕ КОПИРОВАНИЕ ==================
+def backup_database():
+    """Создает резервную копию базы данных"""
+    try:
+        if os.path.exists("data/bot.db"):
+            shutil.copy2("data/bot.db", "data/bot.db.backup")
+            print("✅ Создана резервная копия базы данных")
+    except Exception as e:
+        print(f"❌ Ошибка создания резервной копии: {e}")
+
 # ================== ЗАКРЫТИЕ БАЗЫ ==================
+atexit.register(backup_database)
 atexit.register(db.close)
 
 # ================== ЗАПУСК ==================
