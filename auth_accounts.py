@@ -3,6 +3,26 @@ import asyncio
 import os
 import base64
 from pyrogram import Client
+from flask import Flask
+import os
+
+app = Flask(name)
+
+@app.route('/')
+def show_sessions():
+    result = []
+    for i in range(1, 4):
+        session_file = f"sessions/account_{i}.session"
+        if os.path.exists(session_file):
+            with open(session_file, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
+                result.append(f"SESSION_{i}={b64}")
+    return "<br>".join(result) if result else "No sessions found"
+
+if name == "main":
+    asyncio.run(main())
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
 
 # ================== НАСТРОЙКИ ==================
 API_ID = 37379476
