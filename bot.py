@@ -20,42 +20,7 @@ from aiogram.types import LabeledPrice, PreCheckoutQuery, SuccessfulPayment
 from pyrogram import Client
 from pyrogram.errors import PhoneNumberInvalid, AuthKeyUnregistered, FloodWait
 from pyrogram.enums import ChatType
-# ================== АВТОМАТИЧЕСКОЕ СОЗДАНИЕ СЕССИЙ ==================
-async def create_missing_sessions():
-    """Создаёт недостающие сессии прямо на Render"""
-    print("\n🔍 ПРОВЕРКА НАЛИЧИЯ СЕССИЙ:")
-    os.makedirs("sessions", exist_ok=True)
-    
-    accounts_to_auth = [
-        {"num": 1, "phone": "+16188550568"},
-        {"num": 2, "phone": "+15593721842"},
-        {"num": 3, "phone": "+15399999864"},
-    ]
-    
-    created = 0
-    for acc in accounts_to_auth:
-        session_file = f"sessions/account_{acc['num']}.session"
-        if not os.path.exists(session_file):
-            print(f"❌ Сессия для аккаунта {acc['num']} не найдена. Создаю...")
-            try:
-                app = Client(
-                    name=f"sessions/account_{acc['num']}",
-                    api_id=API_ID,
-                    api_hash=API_HASH,
-                    phone_number=acc['phone']
-                )
-                await app.start()
-                me = await app.get_me()
-                print(f"✅ Аккаунт {acc['num']} создан: {me.first_name}")
-                await app.stop()
-                created += 1
-            except Exception as e:
-                print(f"❌ Ошибка создания сессии для аккаунта {acc['num']}: {e}")
-        else:
-            print(f"✅ Сессия для аккаунта {acc['num']} уже существует")
-    
-    print(f"📊 Создано новых сессий: {created}")
-    print("=" * 50)
+
 
 # ================== НАСТРОЙКА БАЗЫ ДАННЫХ ДЛЯ RENDER ==================
 def setup_database():
@@ -972,4 +937,5 @@ if __name__ == '__main__':
     
     executor.start_polling(dp, skip_updates=True)
    
+
 
