@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: telegram-bot
+    runtime: python
+    repo: https://github.com/geonomer/telegram-bot
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: TOKEN
+        value: 8054814092:AAEVkB2fThqWSL_fwoNFZ7oQ7Dtjwr4wNt0
+      - key: ADMIN_ID
+        value: 5019414179
+      - key: API_ID
+        value: 37379476
+      - key: API_HASH
+        value: 67cf40314dc0f31534b4b7feeae39242
