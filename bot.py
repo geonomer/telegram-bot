@@ -930,12 +930,11 @@ if __name__ == '__main__':
     print("👑 Режим админа: БЕСПЛАТНО")
     print("=" * 50)
     
-    # Запускаем проверку и создание сессий
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(create_missing_sessions())
+    # Удали или закомментируй эту строку:
+    # loop.run_until_complete(create_missing_sessions())
     
     executor.start_polling(dp, skip_updates=True)
    
+
 
 
