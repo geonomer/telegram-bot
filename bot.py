@@ -7,54 +7,67 @@ import re
 import sqlite3
 import atexit
 import base64
-import os
 import requests
 import threading
 import time
-
-def self_ping():
-    """Пингует самого себя каждые 10 минут"""
-    url = os.environ.get('RENDER_EXTERNAL_URL', 'https://telegram-bot.onrender.com')
-    while True:
-        try:
-            requests.get(f"{url}/health", timeout=5)
-            print(f"✅ Self-ping successful at {time.strftime('%H:%M:%S')}")
-        except Exception as e:
-            print(f"❌ Self-ping failed: {e}")
-        time.sleep(600)  # 10 минут
-
-# Запусти это после Flask сервера
-threading.Thread(target=self_ping, daemon=True).start()
-
-def restore_sessions():
-    """Восстанавливает файлы сессий из переменных окружения"""
-    os.makedirs("sessions", exist_ok=True)
-    
-    for i in range(1, 4):
-        session_data = os.environ.get(f'SESSION_{i}')
-        if session_data:
-            try:
-                # Убираем лишние переносы строк из base64
-                session_data = session_data.replace('\n', '').replace('\r', '')
-                with open(f'sessions/account_{i}.session', 'wb') as f:
-                    f.write(base64.b64decode(session_data))
-                print(f"✅ Восстановлена сессия account_{i}")
-            except Exception as e:
-                print(f"❌ Ошибка восстановления session_{i}: {e}")
-
-# Вызови функцию сразу после создания папок
-restore_sessions()
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.types import LabeledPrice, PreCheckoutQuery, SuccessfulPayment
 from pyrogram import Client
-from pyrogram.errors import PhoneNumberInvalid
+from pyrogram.errors import PhoneNumberInvalid, AuthKeyUnregistered, FloodWait
+from pyrogram.enums import ChatType
+
+# ================== ФУНКЦИИ ВОССТАНОВЛЕНИЯ ==================
+def restore_sessions():
+    """Восстанавливает файлы сессий из переменных окружения"""
+    os.makedirs("sessions", exist_ok=True)
+    restored = 0
+    
+    for i in range(1, 4):
+        session_data = os.environ.get(f'SESSION_{i}')
+        if session_data:
+            try:
+                # Убираем лишние переносы строк из base64
+                session_data = session_data.replace('\n', '').replace('\r', '').strip()
+                file_path = f'sessions/account_{i}.session'
+                with open(file_path, 'wb') as f:
+                    f.write(base64.b64decode(session_data))
+                print(f"✅ Восстановлена сессия account_{i}")
+                restored += 1
+            except Exception as e:
+                print(f"❌ Ошибка восстановления session_{i}: {e}")
+    
+    print(f"✅ Восстановлено {restored} сессий")
+    return restored
+
+# ================== ФУНКЦИЯ ПИНГА ==================
+def self_ping():
+    """Пингует самого себя каждые 10 минут"""
+    def ping():
+        url = os.environ.get('RENDER_EXTERNAL_URL', 'https://telegram-bot.onrender.com')
+        while True:
+            try:
+                response = requests.get(f"{url}/health", timeout=5)
+                print(f"✅ Self-ping successful at {time.strftime('%H:%M:%S')} - {response.status_code}")
+            except Exception as e:
+                print(f"❌ Self-ping failed: {e}")
+            time.sleep(600)  # 10 минут
+    
+    thread = threading.Thread(target=ping, daemon=True)
+    thread.start()
+    print("✅ Self-ping thread started")
+
+# Вызываем восстановление сессий сразу
+restore_sessions()
+self_ping()
 
 # ================== НАСТРОЙКИ ==================
-TOKEN = "8054814092:AAEVkB2fThqWSL_fwoNFZ7oQ7Dtjwr4wNt0"
-ADMIN_ID = 5019414179
+TOKEN = os.environ.get('TOKEN', "8054814092:AAEVkB2fThqWSL_fwoNFZ7oQ7Dtjwr4wNt0")
+ADMIN_ID = int(os.environ.get('ADMIN_ID', 5019414179))
+API_ID = int(os.environ.get('API_ID', 37379476))
+API_HASH = os.environ.get('API_HASH', "67cf40314dc0f31534b4b7feeae39242")
 
 PRICE_STARS = 149
 DISCOUNT_STARS = 50
@@ -245,8 +258,8 @@ accounts = {
         "phone": "+16188550568",
         "country": "us",
         "country_name": "США",
-        "api_id": 37379476,
-        "api_hash": "67cf40314dc0f31534b4b7feeae39242",
+        "api_id": API_ID,
+        "api_hash": API_HASH,
         "session_file": "sessions/account_1",
         "in_use": False,
         "current_user": None,
@@ -256,8 +269,8 @@ accounts = {
         "phone": "+15593721842",
         "country": "us",
         "country_name": "США",
-        "api_id": 37379476,
-        "api_hash": "67cf40314dc0f31534b4b7feeae39242",
+        "api_id": API_ID,
+        "api_hash": API_HASH,
         "session_file": "sessions/account_2",
         "in_use": False,
         "current_user": None,
@@ -267,8 +280,8 @@ accounts = {
         "phone": "+15399999864",
         "country": "us",
         "country_name": "США",
-        "api_id": 37379476,
-        "api_hash": "67cf40314dc0f31534b4b7feeae39242",
+        "api_id": API_ID,
+        "api_hash": API_HASH,
         "session_file": "sessions/account_3",
         "in_use": False,
         "current_user": None,
@@ -303,31 +316,51 @@ class CodeGetter:
         try:
             print(f"🔄 Подключаюсь к {phone}...")
             
+            # Проверяем существование файла сессии
+            if not os.path.exists(f"{self.session_file}.session"):
+                print(f"❌ Файл сессии {self.session_file}.session не найден")
+                return None
+            
             app = Client(
                 name=self.session_file,
                 api_id=api_id,
-                api_hash=api_hash
+                api_hash=api_hash,
+                in_memory=False
             )
             
-            await app.start()
-            print(f"✅ Успешно подключился!")
+            try:
+                await app.start()
+                print(f"✅ Успешно подключился!")
+            except Exception as e:
+                print(f"❌ Ошибка подключения: {e}")
+                return None
             
             # Получаем информацию об аккаунте
-            me = await app.get_me()
-            print(f"👤 Аккаунт: {me.first_name}")
+            try:
+                me = await app.get_me()
+                print(f"👤 Аккаунт: {me.first_name} (@{me.username})")
+            except:
+                print("❌ Не удалось получить информацию об аккаунте")
+                await app.stop()
+                return None
             
             # Ищем диалог с Telegram
             print("🔍 Ищу диалог с Telegram...")
             telegram_chat_id = None
             
-            async for dialog in app.get_dialogs():
-                chat = dialog.chat
-                if chat.type.value == "private":
-                    chat_name = (chat.first_name or "").lower()
-                    if "telegram" in chat_name:
-                        telegram_chat_id = chat.id
-                        print(f"✅ Найден чат: {chat.first_name}")
-                        break
+            try:
+                async for dialog in app.get_dialogs(limit=50):
+                    chat = dialog.chat
+                    if chat.type == ChatType.PRIVATE:
+                        chat_name = (chat.first_name or "").lower()
+                        if "telegram" in chat_name:
+                            telegram_chat_id = chat.id
+                            print(f"✅ Найден чат: {chat.first_name}")
+                            break
+            except Exception as e:
+                print(f"❌ Ошибка при получении диалогов: {e}")
+                await app.stop()
+                return None
             
             if not telegram_chat_id:
                 print("❌ Чат Telegram не найден")
@@ -335,23 +368,26 @@ class CodeGetter:
                 return None
             
             # Читаем последние сообщения
-            print(f"📨 Читаю сообщения...")
-            async for msg in app.get_chat_history(telegram_chat_id, limit=20):
-                if msg and msg.text:
-                    print(f"📩 {msg.text[:100]}")
-                    code_match = re.search(r'(\d{5})', msg.text)
-                    if code_match:
-                        code = code_match.group(1)
-                        print(f"✅ НАЙДЕН КОД: {code}")
-                        await app.stop()
-                        return code
+            print(f"📨 Читаю последние 20 сообщений...")
+            try:
+                async for msg in app.get_chat_history(telegram_chat_id, limit=20):
+                    if msg and msg.text:
+                        print(f"📩 {msg.text[:100]}")
+                        code_match = re.search(r'(\d{5})', msg.text)
+                        if code_match:
+                            code = code_match.group(1)
+                            print(f"✅ НАЙДЕН КОД: {code}")
+                            await app.stop()
+                            return code
+            except Exception as e:
+                print(f"❌ Ошибка при чтении истории: {e}")
             
-            print("❌ Код не найден")
+            print("❌ Код не найден в последних сообщениях")
             await app.stop()
             return None
             
         except Exception as e:
-            print(f"❌ Ошибка: {e}")
+            print(f"❌ Критическая ошибка в get_code: {e}")
             return None
 
 # ================== КЛАВИАТУРЫ ==================
@@ -711,7 +747,7 @@ async def get_code_callback(call: types.CallbackQuery):
     else:
         await call.message.answer(
             f"{EMOJI['error']} *Код не найден*\n\n"
-            f"Возможно, аккаунт не онлайн. Попробуй через 1-2 минуты или напиши @dan4ezHelp",
+            f"📞 Напиши @dan4ezHelp",
             parse_mode="Markdown"
         )
     
@@ -727,10 +763,12 @@ async def test(message: types.Message):
     
     results = []
     for num, acc in accounts.items():
-        status = "✅" if acc["in_use"] else "🟢"
-        status_text = "ПРОДАН" if acc["in_use"] else "СВОБОДЕН"
+        if not acc["in_use"]:
+            status = "🟢 СВОБОДЕН"
+        else:
+            status = "🔴 ПРОДАН"
         
-        await message.answer(f"📱 *Номер {num}*: {acc['phone']}\nСтатус: {status} {status_text}", parse_mode="Markdown")
+        await message.answer(f"📱 *Номер {num}*: {acc['phone']}\nСтатус: {status}", parse_mode="Markdown")
         
         if not acc["in_use"]:
             await message.answer(f"🔄 Проверяю номер {num}...")
@@ -747,22 +785,10 @@ async def test(message: types.Message):
             else:
                 await message.answer(f"❌ *Номер {num}*: Код не найден", parse_mode="Markdown")
                 results.append(f"❌ Номер {num}: код не найден")
-        else:
-            results.append(f"⏭️ Номер {num}: пропущен (продан)")
     
-    passed = sum(1 for r in results if "✅" in r)
-    failed = sum(1 for r in results if "❌" in r)
-    skipped = sum(1 for r in results if "⏭️" in r)
-    
-    final_report = (
-        f"📊 *ДИАГНОСТИКА ЗАВЕРШЕНА*\n\n"
-        f"✅ Успешно: {passed}\n"
-        f"❌ Ошибок: {failed}\n"
-        f"⏭️ Пропущено: {skipped}\n"
-        f"📱 Всего: {len(accounts)}"
-    )
-    
-    await message.answer(final_report, parse_mode="Markdown")
+    if results:
+        report = "📊 *ИТОГИ ТЕСТА:*\n\n" + "\n".join(results)
+        await message.answer(report, parse_mode="Markdown")
 
 # ================== СТАТИСТИКА ==================
 @dp.message_handler(commands=['stats'])
@@ -775,31 +801,4 @@ async def stats(message: types.Message):
     sold = sum(1 for acc in accounts.values() if acc["in_use"])
     
     await message.answer(
-        f"{EMOJI['chart']} *СТАТИСТИКА*\n\n"
-        f"{EMOJI['unlock']} Доступно: {available}\n"
-        f"{EMOJI['lock']} Продано: {sold}\n"
-        f"👥 Пользователей: {stats['total_users']}\n"
-        f"👥 Рефералов: {stats['total_refs']}\n"
-        f"💰 Продаж: {stats['total_purchases']}\n"
-        f"💎 Всего звезд: {stats['total_revenue']}⭐",
-        parse_mode="Markdown"
-    )
-
-# ================== ЗАКРЫТИЕ БАЗЫ ==================
-atexit.register(db.close)
-
-# ================== ЗАПУСК ==================
-if __name__ == '__main__':
-    print("=" * 50)
-    print("✅ БОТ ЗАПУЩЕН!")
-    print("=" * 50)
-    print(f"💰 Цена: {PRICE_STARS}⭐")
-    print(f"📱 Аккаунтов: {len(accounts)}")
-    print("🧪 Тест: /test")
-    print("👑 Режим админа: БЕСПЛАТНО")
-    print("=" * 50)
-    
-    executor.start_polling(dp, skip_updates=True)
-
-
-
+        f"{EMOJI['chart']} *СТ
