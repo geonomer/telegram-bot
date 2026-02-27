@@ -11,7 +11,6 @@ import requests
 import threading
 import time
 import shutil
-import tempfile
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
@@ -21,28 +20,71 @@ from pyrogram import Client
 from pyrogram.errors import PhoneNumberInvalid, AuthKeyUnregistered, FloodWait
 from pyrogram.enums import ChatType
 
-# ================== УДАЛЕНИЕ БИТОЙ БАЗЫ ==================
-try:
-    if os.path.exists("data/bot.db"):
-        os.remove("data/bot.db")
-        print("🗑️ Старая битая база удалена")
-    if os.path.exists("data/bot.db.backup"):
-        os.remove("data/bot.db.backup")
-        print("🗑️ Старая резервная копия удалена")
-except Exception as e:
-    print(f"⚠️ Ошибка при удалении: {e}")
+# ================== ВОССТАНОВЛЕНИЕ БАЗЫ ИЗ ENV ==================
+def restore_db_from_env():
+    """Восстанавливает базу данных из переменных окружения"""
+    print("\n🔍 ПРОВЕРКА БЭКАПА БАЗЫ ДАННЫХ:")
+    
+    db_backup = os.environ.get('DB_BACKUP')
+    if db_backup:
+        try:
+            db_backup = db_backup.replace('\n', '').replace('\r', '').strip()
+            db_data = base64.b64decode(db_backup)
+            
+            os.makedirs("data", exist_ok=True)
+            
+            # Создаем резервную копию текущей БД если есть
+            if os.path.exists("data/bot.db"):
+                shutil.copy2("data/bot.db", "data/bot.db.prev")
+                print("📦 Создана резервная копия текущей БД")
+            
+            with open("data/bot.db", "wb") as f:
+                f.write(db_data)
+            
+            print(f"✅ База данных восстановлена из бэкапа ({len(db_data)} байт)")
+            return True
+        except Exception as e:
+            print(f"❌ Ошибка восстановления БД: {e}")
+    
+    # Пробуем восстановить из SQL дампа
+    sql_backup = os.environ.get('SQL_BACKUP')
+    if sql_backup:
+        try:
+            sql_backup = sql_backup.replace('\\n', '\n')
+            
+            # Удаляем старую БД
+            if os.path.exists("data/bot.db"):
+                os.remove("data/bot.db")
+            
+            # Создаем новую из SQL
+            conn = sqlite3.connect("data/bot.db")
+            conn.executescript(sql_backup)
+            conn.commit()
+            conn.close()
+            
+            print(f"✅ База данных восстановлена из SQL дампа")
+            return True
+        except Exception as e:
+            print(f"❌ Ошибка восстановления из SQL: {e}")
+    
+    print("🆕 Будет создана новая база данных")
+    return False
 
 # Создаём папки
 os.makedirs("sessions", exist_ok=True)
 os.makedirs("data", exist_ok=True)
 
-# ================== ФУНКЦИИ ВОССТАНОВЛЕНИЯ ==================
+# Пытаемся восстановить БД
+restore_db_from_env()
+
+# ================== ФУНКЦИИ ВОССТАНОВЛЕНИЯ СЕССИЙ ==================
 def restore_sessions():
     """Восстанавливает файлы сессий из переменных окружения"""
+    print("\n🔍 ПРОВЕРКА СЕССИЙ В ENV:")
     os.makedirs("sessions", exist_ok=True)
     restored = 0
     
-    for i in range(1, 4):
+    for i in range(1, 10):  # Проверяем до 10 сессий
         session_data = os.environ.get(f'SESSION_{i}')
         if session_data:
             try:
@@ -57,12 +99,12 @@ def restore_sessions():
             except Exception as e:
                 print(f"❌ Ошибка восстановления session_{i}: {e}")
     
-    print(f"✅ Восстановлено {restored} сессий")
+    print(f"✅ Восстановлено {restored} сессий из ENV")
     return restored
 
 def check_sessions():
     """Проверяет наличие и валидность файлов сессий"""
-    print("\n🔍 ПРОВЕРКА СЕССИЙ:")
+    print("\n🔍 ПРОВЕРКА ФАЙЛОВ СЕССИЙ:")
     try:
         files = os.listdir("sessions")
         print(f"📁 Файлов в папке sessions: {len(files)}")
@@ -145,6 +187,7 @@ class Database:
     
     def create_tables(self):
         """Создает таблицы, если их нет"""
+        # Таблица пользователей
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -157,6 +200,7 @@ class Database:
             )
         ''')
         
+        # Таблица рефералов
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS referrals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -168,6 +212,7 @@ class Database:
             )
         ''')
         
+        # Таблица покупок
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS purchases (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -179,8 +224,53 @@ class Database:
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
         ''')
+        
+        # Таблица для аккаунтов
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS accounts (
+                account_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_number TEXT UNIQUE,
+                phone TEXT UNIQUE,
+                country TEXT,
+                country_name TEXT,
+                api_id INTEGER,
+                api_hash TEXT,
+                session_file TEXT,
+                description TEXT,
+                in_use INTEGER DEFAULT 0,
+                current_user INTEGER,
+                purchase_date TIMESTAMP,
+                is_active INTEGER DEFAULT 1,
+                FOREIGN KEY (current_user) REFERENCES users(user_id)
+            )
+        ''')
+        
+        # Таблица для истории использования аккаунтов
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS account_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER,
+                user_id INTEGER,
+                action TEXT,
+                date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (account_id) REFERENCES accounts(account_id),
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            )
+        ''')
+        
+        # Таблица для сессий (base64)
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sessions (
+                account_id INTEGER PRIMARY KEY,
+                session_data TEXT,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (account_id) REFERENCES accounts(account_id)
+            )
+        ''')
+        
         self.conn.commit()
     
+    # ========== МЕТОДЫ ДЛЯ ПОЛЬЗОВАТЕЛЕЙ ==========
     def add_user(self, user_id):
         try:
             max_attempts = 10
@@ -224,6 +314,7 @@ class Database:
         
         return None
     
+    # ========== МЕТОДЫ ДЛЯ РЕФЕРАЛОВ ==========
     def add_referral(self, referrer_id, referred_id):
         try:
             self.cursor.execute("SELECT id FROM referrals WHERE referred_id = ?", (referred_id,))
@@ -264,6 +355,7 @@ class Database:
             print(f"Ошибка добавления реферала: {e}")
             return False
     
+    # ========== МЕТОДЫ ДЛЯ ПОКУПОК ==========
     def add_purchase(self, user_id, account_number, phone, price):
         try:
             self.cursor.execute('''
@@ -280,6 +372,168 @@ class Database:
         ''', (user_id,))
         self.conn.commit()
     
+    # ========== МЕТОДЫ ДЛЯ АККАУНТОВ ==========
+    def add_account(self, account_data):
+        """Добавляет новый аккаунт в БД"""
+        try:
+            self.cursor.execute('''
+                INSERT OR REPLACE INTO accounts 
+                (account_number, phone, country, country_name, api_id, api_hash, session_file, description)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                account_data['account_number'],
+                account_data['phone'],
+                account_data['country'],
+                account_data['country_name'],
+                account_data['api_id'],
+                account_data['api_hash'],
+                account_data['session_file'],
+                account_data.get('description', '')
+            ))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"Ошибка добавления аккаунта: {e}")
+            return False
+    
+    def get_all_accounts(self):
+        """Получает все аккаунты из БД"""
+        try:
+            self.cursor.execute('''
+                SELECT * FROM accounts WHERE is_active = 1 ORDER BY account_id
+            ''')
+            rows = self.cursor.fetchall()
+            
+            accounts = {}
+            for row in rows:
+                accounts[str(row[1])] = {  # account_number как ключ
+                    'phone': row[2],
+                    'country': row[3],
+                    'country_name': row[4],
+                    'api_id': row[5],
+                    'api_hash': row[6],
+                    'session_file': row[7],
+                    'description': row[8],
+                    'in_use': bool(row[9]),
+                    'current_user': row[10],
+                    'purchase_date': row[11],
+                    'is_active': bool(row[12])
+                }
+            return accounts
+        except Exception as e:
+            print(f"Ошибка получения аккаунтов: {e}")
+            return {}
+    
+    def get_account(self, account_number):
+        """Получает аккаунт по номеру"""
+        try:
+            self.cursor.execute('''
+                SELECT * FROM accounts WHERE account_number = ? AND is_active = 1
+            ''', (account_number,))
+            row = self.cursor.fetchone()
+            
+            if row:
+                return {
+                    'phone': row[2],
+                    'country': row[3],
+                    'country_name': row[4],
+                    'api_id': row[5],
+                    'api_hash': row[6],
+                    'session_file': row[7],
+                    'description': row[8],
+                    'in_use': bool(row[9]),
+                    'current_user': row[10],
+                    'purchase_date': row[11]
+                }
+        except Exception as e:
+            print(f"Ошибка получения аккаунта: {e}")
+        return None
+    
+    def update_account_status(self, account_number, user_id, in_use=True):
+        """Обновляет статус использования аккаунта"""
+        try:
+            self.cursor.execute('''
+                UPDATE accounts 
+                SET in_use = ?, current_user = ?, purchase_date = CURRENT_TIMESTAMP
+                WHERE account_number = ?
+            ''', (1 if in_use else 0, user_id, account_number))
+            
+            # Добавляем запись в историю
+            self.cursor.execute('''
+                INSERT INTO account_history (account_id, user_id, action)
+                SELECT account_id, ?, ? FROM accounts WHERE account_number = ?
+            ''', (user_id, 'purchase' if in_use else 'release', account_number))
+            
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"Ошибка обновления статуса: {e}")
+            return False
+    
+    def save_session(self, account_number, session_data):
+        """Сохраняет сессию аккаунта в БД"""
+        try:
+            self.cursor.execute('''
+                INSERT OR REPLACE INTO sessions (account_id, session_data, last_updated)
+                SELECT account_id, ?, CURRENT_TIMESTAMP FROM accounts WHERE account_number = ?
+            ''', (session_data, account_number))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"Ошибка сохранения сессии: {e}")
+            return False
+    
+    def load_sessions_from_db(self):
+        """Загружает все сессии из БД и восстанавливает файлы"""
+        try:
+            self.cursor.execute('''
+                SELECT a.account_number, a.session_file, s.session_data 
+                FROM sessions s
+                JOIN accounts a ON s.account_id = a.account_id
+            ''')
+            rows = self.cursor.fetchall()
+            
+            restored = 0
+            for row in rows:
+                account_number, session_file, session_data = row
+                try:
+                    # Декодируем и сохраняем файл
+                    decoded = base64.b64decode(session_data)
+                    with open(f"{session_file}.session", 'wb') as f:
+                        f.write(decoded)
+                    print(f"✅ Восстановлена сессия для аккаунта {account_number}")
+                    restored += 1
+                except Exception as e:
+                    print(f"❌ Ошибка восстановления сессии {account_number}: {e}")
+            
+            return restored
+        except Exception as e:
+            print(f"Ошибка загрузки сессий: {e}")
+            return 0
+    
+    def get_account_stats(self):
+        """Получает статистику по аккаунтам"""
+        try:
+            self.cursor.execute('''
+                SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN in_use = 1 THEN 1 ELSE 0 END) as sold,
+                    SUM(CASE WHEN in_use = 0 THEN 1 ELSE 0 END) as available
+                FROM accounts WHERE is_active = 1
+            ''')
+            row = self.cursor.fetchone()
+            
+            if row:
+                return {
+                    'total': row[0] or 0,
+                    'sold': row[1] or 0,
+                    'available': row[2] or 0
+                }
+        except Exception as e:
+            print(f"Ошибка получения статистики аккаунтов: {e}")
+        return {'total': 0, 'sold': 0, 'available': 0}
+    
+    # ========== СТАТИСТИКА ==========
     def get_stats(self):
         stats = {}
         try:
@@ -303,47 +557,89 @@ class Database:
 
 db = Database()
 
+# ================== ЗАГРУЗКА АККАУНТОВ ИЗ БД ==================
+def init_accounts_from_db():
+    """Инициализирует аккаунты из базы данных"""
+    print("\n🔍 ЗАГРУЗКА АККАУНТОВ ИЗ БД:")
+    
+    # Проверяем, есть ли аккаунты в БД
+    accounts_from_db = db.get_all_accounts()
+    
+    if accounts_from_db:
+        print(f"✅ Загружено {len(accounts_from_db)} аккаунтов из БД")
+        
+        # Загружаем сессии
+        restored = db.load_sessions_from_db()
+        print(f"✅ Восстановлено {restored} сессий из БД")
+        
+        return accounts_from_db
+    else:
+        print("🆕 База данных пуста, создаем начальные аккаунты")
+        
+        # Начальные данные аккаунтов
+        initial_accounts = {
+            "1": {
+                "account_number": "1",
+                "phone": "+16188550568",
+                "country": "us",
+                "country_name": "США",
+                "api_id": API_ID,
+                "api_hash": API_HASH,
+                "session_file": "sessions/account_1",
+                "description": "Аккаунт USA, чистый, прогретый"
+            },
+            "2": {
+                "account_number": "2",
+                "phone": "+15593721842",
+                "country": "us",
+                "country_name": "США",
+                "api_id": API_ID,
+                "api_hash": API_HASH,
+                "session_file": "sessions/account_2",
+                "description": "Аккаунт USA, чистый, прогретый"
+            },
+            "3": {
+                "account_number": "3",
+                "phone": "+15399999864",
+                "country": "us",
+                "country_name": "США",
+                "api_id": API_ID,
+                "api_hash": API_HASH,
+                "session_file": "sessions/account_3",
+                "description": "Аккаунт USA, чистый, прогретый"
+            }
+        }
+        
+        for num, acc_data in initial_accounts.items():
+            db.add_account(acc_data)
+            print(f"✅ Добавлен аккаунт {num} в БД")
+        
+        # Загружаем созданные аккаунты
+        accounts_from_db = db.get_all_accounts()
+        
+        # Сохраняем существующие файлы сессий в БД
+        for num in initial_accounts:
+            session_file = f"sessions/account_{num}.session"
+            if os.path.exists(session_file):
+                try:
+                    with open(session_file, 'rb') as f:
+                        session_data = f.read()
+                        session_b64 = base64.b64encode(session_data).decode('utf-8')
+                        db.save_session(num, session_b64)
+                        print(f"✅ Сохранена сессия аккаунта {num} в БД")
+                except Exception as e:
+                    print(f"❌ Ошибка сохранения сессии {num}: {e}")
+        
+        return accounts_from_db
+
+# Загружаем аккаунты
+accounts = init_accounts_from_db()
+print("=" * 50)
+
 # ================== ПРОВЕРКА БАЗЫ ==================
 if os.path.exists("data/bot.db"):
     size = os.path.getsize("data/bot.db")
     print(f"✅ База данных создана: {size} байт")
-
-# ================== БАЗА АККАУНТОВ ==================
-accounts = {
-    "1": {
-        "phone": "+16188550568",
-        "country": "us",
-        "country_name": "США",
-        "api_id": API_ID,
-        "api_hash": API_HASH,
-        "session_file": "sessions/account_1",
-        "in_use": False,
-        "current_user": None,
-        "description": "Аккаунт USA, чистый, прогретый"
-    },
-    "2": {
-        "phone": "+15593721842",
-        "country": "us",
-        "country_name": "США",
-        "api_id": API_ID,
-        "api_hash": API_HASH,
-        "session_file": "sessions/account_2",
-        "in_use": False,
-        "current_user": None,
-        "description": "Аккаунт USA, чистый, прогретый"
-    },
-    "3": {
-        "phone": "+15399999864",
-        "country": "us",
-        "country_name": "США",
-        "api_id": API_ID,
-        "api_hash": API_HASH,
-        "session_file": "sessions/account_3",
-        "in_use": False,
-        "current_user": None,
-        "description": "Аккаунт USA, чистый, прогретый"
-    }
-}
 
 # ================== ВРЕМЕННЫЕ ДАННЫЕ ==================
 pending_purchases = {}
@@ -558,30 +854,122 @@ async def help_cmd(msg: types.Message):
     )
     await msg.answer(help_text, parse_mode="Markdown")
 
-# ================== ЭКСПОРТ БАЗЫ ==================
+# ================== АДМИН КОМАНДЫ ==================
+@dp.message_handler(commands=['addaccount'])
+async def add_account_cmd(message: types.Message):
+    """Добавляет новый аккаунт в БД (только для админа)"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    args = message.get_args().split()
+    if len(args) < 3:
+        await message.answer(
+            f"{EMOJI['error']} Использование:\n"
+            f"/addaccount номер телефон страна [описание]\n\n"
+            f"Пример: /addaccount 4 +1234567890 США Аккаунт USA"
+        )
+        return
+    
+    account_number = args[0]
+    phone = args[1]
+    country_name = args[2]
+    description = ' '.join(args[3:]) if len(args) > 3 else "Новый аккаунт"
+    
+    # Определяем код страны
+    country_code = "us"  # По умолчанию
+    if "сша" in country_name.lower():
+        country_code = "us"
+    elif "великобрит" in country_name.lower() or "англ" in country_name.lower():
+        country_code = "gb"
+    elif "рос" in country_name.lower() or "ру" in country_name.lower():
+        country_code = "ru"
+    
+    account_data = {
+        "account_number": account_number,
+        "phone": phone,
+        "country": country_code,
+        "country_name": country_name,
+        "api_id": API_ID,
+        "api_hash": API_HASH,
+        "session_file": f"sessions/account_{account_number}",
+        "description": description
+    }
+    
+    if db.add_account(account_data):
+        # Обновляем локальный словарь
+        global accounts
+        accounts = db.get_all_accounts()
+        await message.answer(f"{EMOJI['success']} Аккаунт {account_number} добавлен в БД")
+    else:
+        await message.answer(f"{EMOJI['error']} Ошибка добавления аккаунта")
+
+@dp.message_handler(commands=['save_sessions'])
+async def save_sessions_cmd(message: types.Message):
+    """Сохраняет все текущие сессии в БД"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    await message.answer("🔄 Сохраняю сессии в БД...")
+    
+    saved = 0
+    for num in accounts:
+        session_file = f"sessions/account_{num}.session"
+        if os.path.exists(session_file):
+            try:
+                with open(session_file, 'rb') as f:
+                    session_data = f.read()
+                    session_b64 = base64.b64encode(session_data).decode('utf-8')
+                    if db.save_session(num, session_b64):
+                        saved += 1
+            except Exception as e:
+                print(f"❌ Ошибка сохранения сессии {num}: {e}")
+    
+    await message.answer(f"✅ Сохранено {saved} сессий в БД")
+
 @dp.message_handler(commands=['exportdb'])
 async def export_db(message: types.Message):
+    """Экспортирует всю базу данных"""
     if message.from_user.id != ADMIN_ID:
         return
     
     await message.answer("🔄 Экспортирую базу данных...")
     
     try:
+        # Сохраняем сессии в БД перед экспортом
+        for num in accounts:
+            session_file = f"sessions/account_{num}.session"
+            if os.path.exists(session_file):
+                with open(session_file, 'rb') as f:
+                    session_data = f.read()
+                    session_b64 = base64.b64encode(session_data).decode('utf-8')
+                    db.save_session(num, session_b64)
+        
+        # Экспортируем БД
         if os.path.exists("data/bot.db"):
             with open("data/bot.db", "rb") as f:
                 db_data = f.read()
                 db_b64 = base64.b64encode(db_data).decode('utf-8')
                 
+                # Также создаем дамп SQL для бэкапа
+                backup_sql = []
+                for line in db.conn.iterdump():
+                    backup_sql.append(line)
+                
                 await message.answer(
                     f"✅ База экспортирована!\n\n"
                     f"📊 Размер: {len(db_b64)} символов\n\n"
-                    f"📋 Скопируй строку в переменную DB_BACKUP\n\n"
+                    f"📋 Скопируй строки в переменные окружения:\n"
+                    f"• DB_BACKUP (base64 всей БД)\n"
+                    f"• SQL_BACKUP (SQL дамп)\n\n"
                     f"(полный текст в логах Render)"
                 )
                 
                 print("\n" + "="*50)
                 print("DB_BACKUP = ")
                 print(db_b64)
+                print("\n" + "="*50)
+                print("SQL_BACKUP = ")
+                print('\n'.join(backup_sql))
                 print("="*50 + "\n")
         else:
             await message.answer("❌ База данных не найдена")
@@ -594,12 +982,15 @@ async def process_number(call: types.CallbackQuery):
     user_id = call.from_user.id
     number = call.data.replace("num_", "")
     
-    if number not in accounts:
+    # Получаем актуальные данные из БД
+    account = db.get_account(number)
+    if not account:
         await call.message.answer(f"{EMOJI['error']} Аккаунт не найден")
         await call.answer()
         return
     
-    account = accounts[number]
+    # Обновляем локальный словарь
+    accounts[number] = account
     
     if account["in_use"]:
         await call.message.answer(f"{EMOJI['error']} Этот номер уже куплен")
@@ -626,8 +1017,12 @@ async def process_number(call: types.CallbackQuery):
     )
     
     if user_id == ADMIN_ID:
-        account["in_use"] = True
-        account["current_user"] = user_id
+        # Обновляем статус в БД
+        db.update_account_status(number, user_id, in_use=True)
+        
+        # Обновляем локальный словарь
+        accounts[number]["in_use"] = True
+        accounts[number]["current_user"] = user_id
         
         admin_text = (
             f"{EMOJI['crown']} *ТЕСТОВЫЙ РЕЖИМ АДМИНА*\n\n"
@@ -714,16 +1109,22 @@ async def successful_payment(message: types.Message):
     purchase = pending_purchases.get(user_id, {})
     number = purchase.get("number", "1")
     
-    if number not in accounts:
+    # Получаем аккаунт из БД
+    account = db.get_account(number)
+    if not account:
+        await message.answer(f"{EMOJI['error']} Аккаунт не найден")
         return
-    
-    account = accounts[number]
     
     if account["in_use"]:
+        await message.answer(f"{EMOJI['error']} Аккаунт уже используется")
         return
     
-    account["in_use"] = True
-    account["current_user"] = user_id
+    # Обновляем статус в БД
+    db.update_account_status(number, user_id, in_use=True)
+    
+    # Обновляем локальный словарь
+    accounts[number]["in_use"] = True
+    accounts[number]["current_user"] = user_id
     
     if purchase.get("use_discount", False):
         db.use_discount(user_id)
@@ -855,17 +1256,20 @@ async def stats(message: types.Message):
         return
     
     stats = db.get_stats()
-    available = sum(1 for acc in accounts.values() if not acc["in_use"])
-    sold = sum(1 for acc in accounts.values() if acc["in_use"])
+    account_stats = db.get_account_stats()
     
     await message.answer(
         f"{EMOJI['chart']} *СТАТИСТИКА*\n\n"
-        f"{EMOJI['unlock']} Доступно: {available}\n"
-        f"{EMOJI['lock']} Продано: {sold}\n"
-        f"👥 Пользователей: {stats['total_users']}\n"
-        f"👥 Рефералов: {stats['total_refs']}\n"
-        f"💰 Продаж: {stats['total_purchases']}\n"
-        f"💎 Всего звезд: {stats['total_revenue']}⭐",
+        f"📱 *АККАУНТЫ:*\n"
+        f"{EMOJI['unlock']} Доступно: {account_stats['available']}\n"
+        f"{EMOJI['lock']} Продано: {account_stats['sold']}\n"
+        f"📊 Всего: {account_stats['total']}\n\n"
+        f"👥 *ПОЛЬЗОВАТЕЛИ:*\n"
+        f"👤 Всего: {stats['total_users']}\n"
+        f"👥 Рефералов: {stats['total_refs']}\n\n"
+        f"💰 *ПРОДАЖИ:*\n"
+        f"🛒 Всего: {stats['total_purchases']}\n"
+        f"💎 Звезд: {stats['total_revenue']}⭐",
         parse_mode="Markdown"
     )
 
@@ -875,6 +1279,16 @@ def backup_database():
         if os.path.exists("data/bot.db"):
             shutil.copy2("data/bot.db", "data/bot.db.backup")
             print("✅ Создана резервная копия базы данных")
+            
+            # Также сохраняем сессии в БД
+            for num in accounts:
+                session_file = f"sessions/account_{num}.session"
+                if os.path.exists(session_file):
+                    with open(session_file, 'rb') as f:
+                        session_data = f.read()
+                        session_b64 = base64.b64encode(session_data).decode('utf-8')
+                        db.save_session(num, session_b64)
+            print("✅ Сессии сохранены в БД")
     except Exception as e:
         print(f"❌ Ошибка создания резервной копии: {e}")
 
@@ -891,6 +1305,8 @@ if __name__ == '__main__':
     print(f"📱 Аккаунтов: {len(accounts)}")
     print("🧪 Тест: /test")
     print("📊 Экспорт базы: /exportdb")
+    print("➕ Добавить аккаунт: /addaccount")
+    print("💾 Сохранить сессии: /save_sessions")
     print("👑 Режим админа: БЕСПЛАТНО")
     print("=" * 50)
     
