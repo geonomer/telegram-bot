@@ -21,20 +21,19 @@ from pyrogram import Client
 from pyrogram.errors import PhoneNumberInvalid, AuthKeyUnregistered, FloodWait
 from pyrogram.enums import ChatType
 
-# ================== УДАЛЕНИЕ БИТОЙ БАЗЫ ==================
-try:
-    if os.path.exists("data/bot.db"):
-        os.remove("data/bot.db")
-        print("🗑️ Старая битая база удалена")
-    if os.path.exists("data/bot.db.backup"):
-        os.remove("data/bot.db.backup")
-        print("🗑️ Старая резервная копия удалена")
-except Exception as e:
-    print(f"⚠️ Ошибка при удалении: {e}")
 
-# Создаём папки
-os.makedirs("sessions", exist_ok=True)
-os.makedirs("data", exist_ok=True)
+# ================== НАСТРОЙКА БАЗЫ ДАННЫХ ДЛЯ RENDER ==================
+def setup_database():
+    """Настраивает базу данных для работы на Render"""
+    os.makedirs("data", exist_ok=True)
+    db_path = "data/bot.db"
+    if os.path.exists(db_path):
+        print(f"✅ База данных найдена: {db_path}")
+    else:
+        print(f"🆕 База данных будет создана: {db_path}")
+    return db_path
+
+setup_database()
 
 # ================== ФУНКЦИИ ВОССТАНОВЛЕНИЯ ==================
 def restore_sessions():
@@ -63,6 +62,8 @@ def restore_sessions():
 def check_sessions():
     """Проверяет наличие и валидность файлов сессий"""
     print("\n🔍 ПРОВЕРКА СЕССИЙ:")
+    os.makedirs("sessions", exist_ok=True)
+    
     try:
         files = os.listdir("sessions")
         print(f"📁 Файлов в папке sessions: {len(files)}")
@@ -75,6 +76,7 @@ def check_sessions():
     
     print("=" * 50)
 
+# Вызываем проверки
 restore_sessions()
 check_sessions()
 
@@ -106,6 +108,7 @@ API_HASH = os.environ.get('API_HASH', "67cf40314dc0f31534b4b7feeae39242")
 PRICE_STARS = 149
 DISCOUNT_STARS = 50
 
+# Флаги стран
 FLAGS = {
     "us": "🇺🇸", 
     "ru": "🇷🇺", 
@@ -113,6 +116,7 @@ FLAGS = {
     "mm": "🇲🇲"
 }
 
+# Эмодзи для красоты
 EMOJI = {
     "success": "✅", "error": "❌", "wait": "⏳", "money": "💰",
     "star": "⭐", "phone": "📱", "referral": "👥", "support": "📞",
@@ -126,6 +130,10 @@ EMOJI = {
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
+
+# Создаём папки
+os.makedirs("sessions", exist_ok=True)
+os.makedirs("data", exist_ok=True)
 
 # ================== БАЗА ДАННЫХ SQLITE ==================
 class Database:
@@ -182,6 +190,7 @@ class Database:
         self.conn.commit()
     
     def add_user(self, user_id):
+        """Добавляет нового пользователя с уникальным реферальным кодом"""
         try:
             max_attempts = 10
             for attempt in range(max_attempts):
@@ -203,6 +212,7 @@ class Database:
             return False
     
     def get_user(self, user_id):
+        """Получает данные пользователя"""
         try:
             self.cursor.execute('''
                 SELECT user_id, ref_code, ref_count, discount, discount_used, discount_given
@@ -225,6 +235,7 @@ class Database:
         return None
     
     def add_referral(self, referrer_id, referred_id):
+        """Добавляет реферала и обновляет счетчик"""
         try:
             self.cursor.execute("SELECT id FROM referrals WHERE referred_id = ?", (referred_id,))
             if self.cursor.fetchone():
@@ -265,6 +276,7 @@ class Database:
             return False
     
     def add_purchase(self, user_id, account_number, phone, price):
+        """Добавляет запись о покупке"""
         try:
             self.cursor.execute('''
                 INSERT INTO purchases (user_id, account_number, phone, price)
@@ -275,38 +287,63 @@ class Database:
             print(f"Ошибка добавления покупки: {e}")
     
     def use_discount(self, user_id):
-        self.cursor.execute('''
-            UPDATE users SET discount_used = 1 WHERE user_id = ?
-        ''', (user_id,))
-        self.conn.commit()
+        """Помечает скидку как использованную"""
+        try:
+            self.cursor.execute('''
+                UPDATE users SET discount_used = 1 WHERE user_id = ?
+            ''', (user_id,))
+            self.conn.commit()
+        except Exception as e:
+            print(f"Ошибка использования скидки: {e}")
     
     def get_stats(self):
+        """Получает общую статистику"""
         stats = {}
         try:
             self.cursor.execute("SELECT COUNT(*) FROM users")
             stats['total_users'] = self.cursor.fetchone()[0]
+            
             self.cursor.execute("SELECT COUNT(*) FROM referrals")
             stats['total_refs'] = self.cursor.fetchone()[0]
+            
             self.cursor.execute("SELECT COUNT(*) FROM purchases")
             stats['total_purchases'] = self.cursor.fetchone()[0]
+            
             self.cursor.execute("SELECT SUM(price) FROM purchases")
             total = self.cursor.fetchone()[0]
             stats['total_revenue'] = total if total else 0
         except Exception as e:
+            print(f"Ошибка получения статистики: {e}")
             stats = {'total_users': 0, 'total_refs': 0, 'total_purchases': 0, 'total_revenue': 0}
+        
         return stats
     
     def close(self):
+        """Закрывает соединение с базой"""
         if self.conn:
             self.conn.close()
             print("✅ База данных закрыта")
 
 db = Database()
 
-# ================== ПРОВЕРКА БАЗЫ ==================
-if os.path.exists("data/bot.db"):
-    size = os.path.getsize("data/bot.db")
-    print(f"✅ База данных создана: {size} байт")
+# ================== ПРОВЕРКА БАЗЫ ДАННЫХ ==================
+def verify_database():
+    """Проверяет целостность базы данных"""
+    print("\n🔍 ПРОВЕРКА БАЗЫ ДАННЫХ:")
+    
+    if os.path.exists("data/bot.db"):
+        size = os.path.getsize("data/bot.db")
+        print(f"✅ Файл базы данных найден: data/bot.db ({size} байт)")
+    else:
+        print("❌ Файл базы данных не найден, будет создан новый")
+    
+    if os.path.exists("data/bot.db.backup"):
+        size = os.path.getsize("data/bot.db.backup")
+        print(f"✅ Резервная копия найдена: data/bot.db.backup ({size} байт)")
+    
+    print("=" * 50)
+
+verify_database()
 
 # ================== БАЗА АККАУНТОВ ==================
 accounts = {
@@ -368,6 +405,7 @@ class CodeGetter:
         print(f"✅ CodeGetter готов для {session_file}")
     
     async def get_code(self, phone, api_id, api_hash):
+        """Получает код из чата с Telegram"""
         try:
             print(f"🔄 Подключаюсь к {phone}...")
             
@@ -376,6 +414,8 @@ class CodeGetter:
                 print(f"❌ Файл сессии {session_path} не найден")
                 return None
             
+            print(f"✅ Файл сессии найден: {session_path}")
+            
             app = Client(
                 name=self.session_file,
                 api_id=api_id,
@@ -383,42 +423,67 @@ class CodeGetter:
                 workdir="."
             )
             
-            await app.start()
-            print(f"✅ Успешно подключился!")
+            try:
+                print("🔄 Попытка подключения...")
+                await app.start()
+                print(f"✅ Успешно подключился!")
+            except Exception as e:
+                print(f"❌ Ошибка подключения: {e}")
+                return None
             
-            me = await app.get_me()
-            print(f"👤 Аккаунт: {me.first_name}")
+            try:
+                me = await app.get_me()
+                print(f"👤 Аккаунт: {me.first_name} (ID: {me.id})")
+            except Exception as e:
+                print(f"❌ Не удалось получить информацию об аккаунте: {e}")
+                await app.stop()
+                return None
             
-            # Ищем диалог с Telegram
+            print("🔍 Ищу диалог с Telegram...")
             telegram_chat_id = None
-            async for dialog in app.get_dialogs(limit=50):
-                chat = dialog.chat
-                if chat.first_name and "telegram" in chat.first_name.lower():
-                    telegram_chat_id = chat.id
-                    print(f"✅ Найден чат Telegram: {chat.first_name}")
-                    break
+            
+            try:
+                async for dialog in app.get_dialogs(limit=50):
+                    chat = dialog.chat
+                    if chat.first_name:
+                        chat_name = chat.first_name.lower()
+                        if "telegram" in chat_name:
+                            telegram_chat_id = chat.id
+                            print(f"✅ Найден чат Telegram: {chat.first_name}")
+                            break
+            except Exception as e:
+                print(f"❌ Ошибка при получении диалогов: {e}")
+                await app.stop()
+                return None
             
             if not telegram_chat_id:
                 print("❌ Чат Telegram не найден")
                 await app.stop()
                 return None
             
-            # Читаем последние сообщения
-            async for msg in app.get_chat_history(telegram_chat_id, limit=20):
-                if msg and msg.text:
-                    code_match = re.search(r'(\d{5})', msg.text)
-                    if code_match:
-                        code = code_match.group(1)
-                        print(f"✅ НАЙДЕН КОД: {code}")
-                        await app.stop()
-                        return code
+            print(f"📨 Читаю последние сообщения...")
+            messages_found = 0
             
-            print("❌ Код не найден")
+            try:
+                async for msg in app.get_chat_history(telegram_chat_id, limit=20):
+                    messages_found += 1
+                    if msg and msg.text:
+                        print(f"📩 [{messages_found}] {msg.text[:100]}")
+                        code_match = re.search(r'(\d{5})', msg.text)
+                        if code_match:
+                            code = code_match.group(1)
+                            print(f"✅ НАЙДЕН КОД: {code}")
+                            await app.stop()
+                            return code
+            except Exception as e:
+                print(f"❌ Ошибка при чтении истории: {e}")
+            
+            print(f"📨 Проверено {messages_found} сообщений, код не найден")
             await app.stop()
             return None
             
         except Exception as e:
-            print(f"❌ Ошибка: {e}")
+            print(f"❌ Критическая ошибка в get_code: {e}")
             return None
 
 # ================== КЛАВИАТУРЫ ==================
@@ -480,6 +545,7 @@ async def start(message: types.Message):
     )
     await message.reply(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
+# ================== РЕФЕРАЛЫ ==================
 @dp.message_handler(lambda msg: msg.text == "👥 Рефералы")
 async def referrals(msg: types.Message):
     user = get_user(msg.from_user.id)
@@ -557,36 +623,6 @@ async def help_cmd(msg: types.Message):
         f"{EMOJI['referral']} 5 друзей = скидка {DISCOUNT_STARS}⭐"
     )
     await msg.answer(help_text, parse_mode="Markdown")
-
-# ================== ЭКСПОРТ БАЗЫ ==================
-@dp.message_handler(commands=['exportdb'])
-async def export_db(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    await message.answer("🔄 Экспортирую базу данных...")
-    
-    try:
-        if os.path.exists("data/bot.db"):
-            with open("data/bot.db", "rb") as f:
-                db_data = f.read()
-                db_b64 = base64.b64encode(db_data).decode('utf-8')
-                
-                await message.answer(
-                    f"✅ База экспортирована!\n\n"
-                    f"📊 Размер: {len(db_b64)} символов\n\n"
-                    f"📋 Скопируй строку в переменную DB_BACKUP\n\n"
-                    f"(полный текст в логах Render)"
-                )
-                
-                print("\n" + "="*50)
-                print("DB_BACKUP = ")
-                print(db_b64)
-                print("="*50 + "\n")
-        else:
-            await message.answer("❌ База данных не найдена")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка экспорта: {e}")
 
 # ================== ВЫБОР НОМЕРА ==================
 @dp.callback_query_handler(lambda c: c.data.startswith("num_"))
@@ -871,6 +907,7 @@ async def stats(message: types.Message):
 
 # ================== РЕЗЕРВНОЕ КОПИРОВАНИЕ ==================
 def backup_database():
+    """Создает резервную копию базы данных"""
     try:
         if os.path.exists("data/bot.db"):
             shutil.copy2("data/bot.db", "data/bot.db.backup")
@@ -890,8 +927,10 @@ if __name__ == '__main__':
     print(f"💰 Цена: {PRICE_STARS}⭐")
     print(f"📱 Аккаунтов: {len(accounts)}")
     print("🧪 Тест: /test")
-    print("📊 Экспорт базы: /exportdb")
     print("👑 Режим админа: БЕСПЛАТНО")
     print("=" * 50)
+    
+    # Удали или закомментируй эту строку:
+    # loop.run_until_complete(create_missing_sessions())
     
     executor.start_polling(dp, skip_updates=True)
