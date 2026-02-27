@@ -12,6 +12,14 @@ import threading
 import time
 import shutil
 import tempfile
+# ВРЕМЕННО: удаляем битую базу
+import os
+try:
+    if os.path.exists("data/bot.db"):
+        os.remove("data/bot.db")
+        print("🗑️ Старая битая база удалена")
+except:
+    pass
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
@@ -986,4 +994,5 @@ if __name__ == '__main__':
     print("=" * 50)
     
     executor.start_polling(dp, skip_updates=True)
+
 
