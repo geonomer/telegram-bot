@@ -35,6 +35,23 @@ def setup_database():
 
 setup_database()
 
+# ================== ВОССТАНОВЛЕНИЕ БАЗЫ ИЗ ПЕРЕМЕННОЙ ==================
+def restore_db_from_env():
+    """Восстанавливает базу данных из переменной окружения"""
+    db_backup = os.environ.get('DB_BACKUP')
+    if db_backup:
+        try:
+            os.makedirs("data", exist_ok=True)
+            db_data = base64.b64decode(db_backup)
+            with open("data/bot.db", "wb") as f:
+                f.write(db_data)
+            print(f"✅ База данных восстановлена из переменной окружения")
+        except Exception as e:
+            print(f"❌ Ошибка восстановления базы: {e}")
+
+# Вызываем восстановление базы
+restore_db_from_env()
+
 # ================== ФУНКЦИИ ВОССТАНОВЛЕНИЯ ==================
 def restore_sessions():
     """Восстанавливает файлы сессий из переменных окружения"""
@@ -624,6 +641,40 @@ async def help_cmd(msg: types.Message):
     )
     await msg.answer(help_text, parse_mode="Markdown")
 
+# ================== ЭКСПОРТ БАЗЫ ДАННЫХ ==================
+@dp.message_handler(commands=['exportdb'])
+async def export_db(message: types.Message):
+    """Экспортирует базу данных в base64 (только для админа)"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    await message.answer("🔄 Экспортирую базу данных...")
+    
+    try:
+        if os.path.exists("data/bot.db"):
+            with open("data/bot.db", "rb") as f:
+                db_data = f.read()
+                db_b64 = base64.b64encode(db_data).decode('utf-8')
+                
+                # Отправляем в личные сообщения
+                await message.answer(
+                    f"✅ База экспортирована!\n\n"
+                    f"📊 Размер: {len(db_b64)} символов\n\n"
+                    f"📋 Скопируй ЭТУ строку в переменную DB_BACKUP:\n\n"
+                    f"```\n{db_b64[:200]}...\n```\n\n"
+                    f"(полный текст в логах Render)"
+                )
+                
+                # Логируем полную строку
+                print("\n" + "="*50)
+                print("DB_BACKUP = ")
+                print(db_b64)
+                print("="*50 + "\n")
+        else:
+            await message.answer("❌ База данных не найдена")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка экспорта: {e}")
+
 # ================== ВЫБОР НОМЕРА ==================
 @dp.callback_query_handler(lambda c: c.data.startswith("num_"))
 async def process_number(call: types.CallbackQuery):
@@ -927,14 +978,8 @@ if __name__ == '__main__':
     print(f"💰 Цена: {PRICE_STARS}⭐")
     print(f"📱 Аккаунтов: {len(accounts)}")
     print("🧪 Тест: /test")
+    print("📊 Экспорт базы: /exportdb")
     print("👑 Режим админа: БЕСПЛАТНО")
     print("=" * 50)
     
-    # Удали или закомментируй эту строку:
-    # loop.run_until_complete(create_missing_sessions())
-    
     executor.start_polling(dp, skip_updates=True)
-   
-
-
-
