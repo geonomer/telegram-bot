@@ -20,6 +20,92 @@ from pyrogram import Client
 from pyrogram.errors import PhoneNumberInvalid, AuthKeyUnregistered, FloodWait
 from pyrogram.enums import ChatType
 
+# ================== ПРОВЕРКА И ВОССТАНОВЛЕНИЕ БАЗЫ ==================
+def fix_corrupted_db():
+    """Проверяет и исправляет поврежденную базу данных"""
+    print("\n🔧 ПРОВЕРКА ЦЕЛОСТНОСТИ БАЗЫ ДАННЫХ:")
+    
+    # Создаем папки
+    os.makedirs("sessions", exist_ok=True)
+    os.makedirs("data", exist_ok=True)
+    
+    db_path = "data/bot.db"
+    
+    # Принудительный сброс базы если есть переменная окружения
+    if os.environ.get('RESET_DB') == 'true':
+        print("🗑️ Принудительное удаление базы по RESET_DB")
+        if os.path.exists(db_path):
+            os.remove(db_path)
+        if os.path.exists("data/bot.db.backup"):
+            os.remove("data/bot.db.backup")
+    
+    # Проверяем существует ли файл
+    if os.path.exists(db_path):
+        size = os.path.getsize(db_path)
+        print(f"📊 Размер файла БД: {size} байт")
+        
+        # Пробуем подключиться для проверки
+        try:
+            test_conn = sqlite3.connect(db_path)
+            test_cursor = test_conn.cursor()
+            test_cursor.execute("PRAGMA integrity_check")
+            result = test_cursor.fetchone()
+            test_conn.close()
+            
+            if result and result[0] == "ok":
+                print("✅ База данных в порядке")
+                return True
+            else:
+                print("❌ База данных повреждена!")
+                
+        except Exception as e:
+            print(f"❌ Ошибка при проверке: {e}")
+        
+        # Если база повреждена, пытаемся восстановить из бэкапа
+        backup_path = "data/bot.db.backup"
+        if os.path.exists(backup_path):
+            print("🔄 Найден бэкап, восстанавливаем...")
+            try:
+                # Проверяем бэкап
+                test_conn = sqlite3.connect(backup_path)
+                test_cursor = test_conn.cursor()
+                test_cursor.execute("PRAGMA integrity_check")
+                result = test_cursor.fetchone()
+                test_conn.close()
+                
+                if result and result[0] == "ok":
+                    shutil.copy2(backup_path, db_path)
+                    print("✅ База восстановлена из бэкапа")
+                    return True
+                else:
+                    print("❌ Бэкап тоже поврежден")
+            except Exception as e:
+                print(f"❌ Ошибка при восстановлении из бэкапа: {e}")
+        
+        # Если бэкапа нет или он поврежден, создаем новую базу
+        print("🆕 Создаем новую базу данных...")
+        try:
+            # Переименовываем старую для анализа
+            if os.path.exists(db_path):
+                corrupted_path = f"data/bot.db.corrupted_{int(time.time())}"
+                os.rename(db_path, corrupted_path)
+                print(f"📦 Поврежденная база сохранена как {corrupted_path}")
+            
+            # Создаем новую базу
+            new_conn = sqlite3.connect(db_path)
+            new_conn.close()
+            print("✅ Новая база данных создана")
+            return True
+        except Exception as e:
+            print(f"❌ Ошибка создания новой базы: {e}")
+            return False
+    else:
+        print("🆕 Файл базы не существует, будет создан новый")
+        return True
+
+# Вызываем проверку перед всем остальным
+fix_corrupted_db()
+
 # ================== ВОССТАНОВЛЕНИЕ БАЗЫ ИЗ ENV ==================
 def restore_db_from_env():
     """Восстанавливает базу данных из переменных окружения"""
@@ -31,12 +117,17 @@ def restore_db_from_env():
             db_backup = db_backup.replace('\n', '').replace('\r', '').strip()
             db_data = base64.b64decode(db_backup)
             
-            os.makedirs("data", exist_ok=True)
-            
             # Создаем резервную копию текущей БД если есть
             if os.path.exists("data/bot.db"):
-                shutil.copy2("data/bot.db", "data/bot.db.prev")
-                print("📦 Создана резервная копия текущей БД")
+                # Проверяем текущую БД
+                try:
+                    test_conn = sqlite3.connect("data/bot.db")
+                    test_conn.close()
+                    # Если все ок, делаем бэкап
+                    shutil.copy2("data/bot.db", "data/bot.db.prev")
+                    print("📦 Создана резервная копия текущей БД")
+                except:
+                    print("⚠️ Текущая БД повреждена, будет заменена")
             
             with open("data/bot.db", "wb") as f:
                 f.write(db_data)
@@ -46,33 +137,8 @@ def restore_db_from_env():
         except Exception as e:
             print(f"❌ Ошибка восстановления БД: {e}")
     
-    # Пробуем восстановить из SQL дампа
-    sql_backup = os.environ.get('SQL_BACKUP')
-    if sql_backup:
-        try:
-            sql_backup = sql_backup.replace('\\n', '\n')
-            
-            # Удаляем старую БД
-            if os.path.exists("data/bot.db"):
-                os.remove("data/bot.db")
-            
-            # Создаем новую из SQL
-            conn = sqlite3.connect("data/bot.db")
-            conn.executescript(sql_backup)
-            conn.commit()
-            conn.close()
-            
-            print(f"✅ База данных восстановлена из SQL дампа")
-            return True
-        except Exception as e:
-            print(f"❌ Ошибка восстановления из SQL: {e}")
-    
     print("🆕 Будет создана новая база данных")
     return False
-
-# Создаём папки
-os.makedirs("sessions", exist_ok=True)
-os.makedirs("data", exist_ok=True)
 
 # Пытаемся восстановить БД
 restore_db_from_env()
@@ -175,15 +241,107 @@ class Database:
         self.db_path = "data/bot.db"
         self.conn = None
         self.cursor = None
-        self.connect()
+        self.max_retries = 3
+        self.connect_with_retry()
         self.create_tables()
         print("✅ База данных SQLite инициализирована")
     
-    def connect(self):
-        """Подключается к базе данных"""
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+    def connect_with_retry(self):
+        """Подключается к базе с повторными попытками"""
+        for attempt in range(self.max_retries):
+            try:
+                self.conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=20)
+                self.conn.row_factory = sqlite3.Row
+                self.cursor = self.conn.cursor()
+                
+                # Проверяем целостность
+                self.cursor.execute("PRAGMA integrity_check")
+                result = self.cursor.fetchone()
+                if result and result[0] == "ok":
+                    print(f"✅ Подключение к БД успешно (попытка {attempt + 1})")
+                    return True
+                else:
+                    raise sqlite3.DatabaseError("Database integrity check failed")
+                    
+            except sqlite3.DatabaseError as e:
+                print(f"❌ Ошибка БД (попытка {attempt + 1}): {e}")
+                
+                if attempt < self.max_retries - 1:
+                    # Пробуем восстановить
+                    self.recover_database()
+                    time.sleep(2)
+                else:
+                    # Создаем новую базу
+                    self.create_new_database()
+        
+        return False
+    
+    def recover_database(self):
+        """Пытается восстановить поврежденную базу"""
+        print("🔄 Попытка восстановления базы данных...")
+        
+        backup_path = "data/bot.db.backup"
+        
+        # Если есть бэкап, пробуем его
+        if os.path.exists(backup_path):
+            try:
+                # Проверяем бэкап
+                test_conn = sqlite3.connect(backup_path)
+                test_conn.close()
+                shutil.copy2(backup_path, self.db_path)
+                print("✅ База восстановлена из бэкапа")
+                return True
+            except:
+                pass
+        
+        # Пробуем восстановить через SQL дамп
+        try:
+            # Читаем поврежденную базу
+            corrupted_conn = sqlite3.connect(self.db_path)
+            corrupted_conn.text_factory = bytes  # Читаем как байты для обхода ошибок
+            
+            # Создаем дамп
+            with open('data/dump.sql', 'w') as f:
+                for line in corrupted_conn.iterdump():
+                    try:
+                        # Пытаемся декодировать строку
+                        if isinstance(line, bytes):
+                            line = line.decode('utf-8', errors='ignore')
+                        f.write('%s\n' % line)
+                    except:
+                        continue
+            
+            corrupted_conn.close()
+            
+            # Создаем новую базу из дампа
+            os.rename(self.db_path, self.db_path + ".old")
+            new_conn = sqlite3.connect(self.db_path)
+            with open('data/dump.sql', 'r') as f:
+                sql_script = f.read()
+                new_conn.executescript(sql_script)
+            new_conn.close()
+            
+            print("✅ База восстановлена через SQL дамп")
+            return True
+        except Exception as e:
+            print(f"❌ Ошибка восстановления: {e}")
+            return False
+    
+    def create_new_database(self):
+        """Создает новую базу данных"""
+        print("🆕 Создание новой базы данных...")
+        
+        # Сохраняем старую базу для анализа
+        if os.path.exists(self.db_path):
+            corrupted_path = f"data/bot.db.corrupted_{int(time.time())}"
+            os.rename(self.db_path, corrupted_path)
+            print(f"📦 Поврежденная база сохранена как {corrupted_path}")
+        
+        # Создаем новую
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=20)
         self.conn.row_factory = sqlite3.Row
         self.cursor = self.conn.cursor()
+        print("✅ Новая база данных создана")
     
     def create_tables(self):
         """Создает таблицы, если их нет"""
