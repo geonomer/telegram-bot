@@ -970,6 +970,9 @@ def backup_database():
 atexit.register(backup_database)
 atexit.register(db.close)
 
+# Временно закомментируй эту строку:
+# restore_db_from_env()
+
 # ================== ЗАПУСК ==================
 if __name__ == '__main__':
     print("=" * 50)
@@ -983,3 +986,4 @@ if __name__ == '__main__':
     print("=" * 50)
     
     executor.start_polling(dp, skip_updates=True)
+
