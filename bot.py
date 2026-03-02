@@ -396,7 +396,7 @@ class Database:
             )
         ''')
         
-        # Таблица для отслеживания переходов по ссылкам (новая)
+        # Таблица для отслеживания переходов по ссылкам
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS referral_clicks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -562,7 +562,7 @@ class Database:
         except Exception as e:
             print(f"Ошибка проверки реферала: {e}")
             return False, "Ошибка проверки"
-    
+
     def record_referral_click(self, user_id, ref_code):
         """Записывает факт перехода по ссылке"""
         try:
@@ -937,6 +937,9 @@ if os.path.exists("data/bot.db"):
 # ================== ВРЕМЕННЫЕ ДАННЫЕ ==================
 pending_purchases = {}
 
+# Словарь для хранения реферальных кодов неподписанных пользователей
+pending_refs = {}
+
 def get_user(user_id):
     user = db.get_user(user_id)
     if not user:
@@ -1070,17 +1073,27 @@ async def start(message: types.Message):
     user_id = message.from_user.id
     args = message.get_args()
     
-    # Проверяем подписку на канал
+    # Получаем или создаем пользователя
+    user = get_user(user_id)
+    
+    # Проверяем подписку
     if not await check_subscription(user_id):
+        # Если есть реферальный код, сохраняем его
+        if args:
+            pending_refs[user_id] = args
+        
         text = (
             f"{EMOJI['guard']} *Для работы с ботом необходимо подписаться на канал!*\n\n"
             f"📢 *Канал:* {CHANNEL_USERNAME}\n\n"
-            f"После подписки нажми кнопку *'Я подписался'*"
+            f"После подписки нажми кнопку *'Я подписался'*\n\n"
+            f"{'🔗 *Вы перешли по реферальной ссылке!*' if args else ''}"
         )
         await message.answer(text, parse_mode="Markdown", reply_markup=get_subscription_keyboard())
         return
     
-    user = get_user(user_id)
+    # Если пользователь подписан, проверяем сохраненный реферальный код
+    if user_id in pending_refs:
+        args = pending_refs.pop(user_id)  # Забираем и удаляем код
     
     # Обработка реферальной ссылки
     if args:
@@ -1098,10 +1111,14 @@ async def start(message: types.Message):
         else:
             await message.answer(f"{EMOJI['info']} {result}")
     
+    # Главное меню
     text = (
         f"{EMOJI['phone']} *Добро пожаловать!*\n\n"
         f"{EMOJI['star']} *Цена:* {PRICE_STARS} звёзд\n"
-        f"{EMOJI['referral']} *Рефералы:* 5 друзей = скидка {DISCOUNT_STARS} {EMOJI['star']}"
+        f"{EMOJI['referral']} *Рефералы:* 5 друзей = скидка {DISCOUNT_STARS} {EMOJI['star']}\n\n"
+        f"👤 *Твоя статистика:*\n"
+        f"• Приглашено всего: {user['total_invited']} чел.\n"
+        f"• Активно для скидки: {user['ref_count']}/5"
     )
     await message.reply(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
@@ -1113,8 +1130,15 @@ async def check_sub_callback(call: types.CallbackQuery):
     is_subscribed = await check_subscription(user_id)
     
     if is_subscribed:
+        # Удаляем сообщение с просьбой подписаться
         await call.message.delete()
-        await start(call.message)
+        
+        # Создаем новое сообщение для обработки start
+        new_message = call.message
+        new_message.text = "/start"
+        
+        # Вызываем start
+        await start(new_message)
         await call.answer("✅ Подписка подтверждена!")
     else:
         await call.answer("❌ Вы еще не подписались! Подпишитесь и нажмите снова", show_alert=True)
@@ -1706,7 +1730,6 @@ if __name__ == '__main__':
     print("📊 Экспорт базы: /exportdb")
     print("➕ Добавить аккаунт: /addaccount")
     print("💾 Сохранить сессии: /save_sessions")
-    print("📈 Всего приглашений: /total_invites")
     print("👑 Режим админа: БЕСПЛАТНО")
     print("=" * 50)
     
