@@ -244,6 +244,10 @@ class Database:
         self.max_retries = 3
         self.connect_with_retry()
         self.create_tables()
+        
+        # Проверяем и добавляем поле total_invited если его нет
+        self.migrate_database()
+        
         print("✅ База данных SQLite инициализирована")
     
     def connect_with_retry(self):
@@ -343,9 +347,29 @@ class Database:
         self.cursor = self.conn.cursor()
         print("✅ Новая база данных создана")
     
+    def migrate_database(self):
+        """Добавляет новые поля в существующую таблицу"""
+        try:
+            # Проверяем, есть ли поле total_invited
+            self.cursor.execute("PRAGMA table_info(users)")
+            columns = [column[1] for column in self.cursor.fetchall()]
+            
+            if 'total_invited' not in columns:
+                print("🔄 Добавляем поле total_invited в таблицу users...")
+                self.cursor.execute('ALTER TABLE users ADD COLUMN total_invited INTEGER DEFAULT 0')
+                self.conn.commit()
+                print("✅ Поле total_invited добавлено")
+                
+                # Обновляем существующие записи: total_invited = ref_count
+                self.cursor.execute('UPDATE users SET total_invited = ref_count')
+                self.conn.commit()
+                print(f"✅ Обновлено {self.cursor.rowcount} записей")
+        except Exception as e:
+            print(f"⚠️ Ошибка при миграции: {e}")
+    
     def create_tables(self):
         """Создает таблицы, если их нет"""
-        # Таблица пользователей с новым полем total_invited
+        # Таблица пользователей
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -354,8 +378,7 @@ class Database:
                 discount INTEGER DEFAULT 0,
                 discount_used INTEGER DEFAULT 0,
                 discount_given INTEGER DEFAULT 0,
-                join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                total_invited INTEGER DEFAULT 0
+                join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
@@ -453,22 +476,45 @@ class Database:
     
     def get_user(self, user_id):
         try:
-            self.cursor.execute('''
-                SELECT user_id, ref_code, ref_count, discount, discount_used, discount_given, total_invited
-                FROM users WHERE user_id = ?
-            ''', (user_id,))
-            row = self.cursor.fetchone()
+            # Пробуем получить все поля, включая total_invited
+            self.cursor.execute("PRAGMA table_info(users)")
+            columns = [column[1] for column in self.cursor.fetchall()]
             
-            if row:
-                return {
-                    "user_id": row[0],
-                    "ref_code": row[1],
-                    "ref_count": row[2],
-                    "discount": row[3],
-                    "discount_used": bool(row[4]),
-                    "discount_given": bool(row[5]),
-                    "total_invited": row[6] or 0
-                }
+            if 'total_invited' in columns:
+                self.cursor.execute('''
+                    SELECT user_id, ref_code, ref_count, discount, discount_used, discount_given, total_invited
+                    FROM users WHERE user_id = ?
+                ''', (user_id,))
+                row = self.cursor.fetchone()
+                
+                if row:
+                    return {
+                        "user_id": row[0],
+                        "ref_code": row[1],
+                        "ref_count": row[2],
+                        "discount": row[3],
+                        "discount_used": bool(row[4]),
+                        "discount_given": bool(row[5]),
+                        "total_invited": row[6] or 0
+                    }
+            else:
+                # Если поля нет, получаем без него
+                self.cursor.execute('''
+                    SELECT user_id, ref_code, ref_count, discount, discount_used, discount_given
+                    FROM users WHERE user_id = ?
+                ''', (user_id,))
+                row = self.cursor.fetchone()
+                
+                if row:
+                    return {
+                        "user_id": row[0],
+                        "ref_code": row[1],
+                        "ref_count": row[2],
+                        "discount": row[3],
+                        "discount_used": bool(row[4]),
+                        "discount_given": bool(row[5]),
+                        "total_invited": row[2]  # Используем ref_count как запасной вариант
+                    }
         except Exception as e:
             print(f"Ошибка получения пользователя {user_id}: {e}")
         
@@ -489,21 +535,33 @@ class Database:
                 VALUES (?, ?)
             ''', (referrer_id, referred_id))
             
-            # Увеличиваем оба счетчика: текущий ref_count И общий total_invited
-            self.cursor.execute('''
-                UPDATE users 
-                SET ref_count = ref_count + 1,
-                    total_invited = total_invited + 1
-                WHERE user_id = ?
-            ''', (referrer_id,))
+            # Проверяем, есть ли поле total_invited
+            self.cursor.execute("PRAGMA table_info(users)")
+            columns = [column[1] for column in self.cursor.fetchall()]
             
+            if 'total_invited' in columns:
+                # Если поле есть - обновляем оба счетчика
+                self.cursor.execute('''
+                    UPDATE users 
+                    SET ref_count = ref_count + 1,
+                        total_invited = total_invited + 1
+                    WHERE user_id = ?
+                ''', (referrer_id,))
+            else:
+                # Если поля нет - только ref_count
+                self.cursor.execute('''
+                    UPDATE users 
+                    SET ref_count = ref_count + 1
+                    WHERE user_id = ?
+                ''', (referrer_id,))
+            
+            # Проверка на скидку
             self.cursor.execute('''
                 SELECT ref_count FROM users WHERE user_id = ?
             ''', (referrer_id,))
             ref_count_row = self.cursor.fetchone()
             if ref_count_row:
                 ref_count = ref_count_row[0]
-                
                 if ref_count >= 5:
                     self.cursor.execute('''
                         UPDATE users 
@@ -699,8 +757,18 @@ class Database:
     def get_total_invites_alltime(self):
         """Возвращает общее количество приглашенных людей за всё время"""
         try:
-            self.cursor.execute('SELECT SUM(total_invited) FROM users')
-            total = self.cursor.fetchone()[0]
+            # Проверяем, есть ли поле total_invited
+            self.cursor.execute("PRAGMA table_info(users)")
+            columns = [column[1] for column in self.cursor.fetchall()]
+            
+            if 'total_invited' in columns:
+                self.cursor.execute('SELECT SUM(total_invited) FROM users')
+                total = self.cursor.fetchone()[0]
+            else:
+                # Если поля нет - считаем по таблице referrals
+                self.cursor.execute('SELECT COUNT(*) FROM referrals')
+                total = self.cursor.fetchone()[0]
+            
             return total if total else 0
         except Exception as e:
             print(f"Ошибка подсчета всех приглашений: {e}")
@@ -1158,16 +1226,15 @@ async def total_invites(message: types.Message):
     
     total = db.get_total_invites_alltime()
     
-    # Также получаем количество записей в таблице рефералов для проверки
+    # Также получаем количество записей в таблице рефералов для сравнения
     db.cursor.execute('SELECT COUNT(*) FROM referrals')
     referrals_count = db.cursor.fetchone()[0]
     
     await message.answer(
         f"📊 *ОБЩАЯ СТАТИСТИКА ПРИГЛАШЕНИЙ*\n\n"
         f"👥 *Всего приглашено:* `{total}` человек\n"
-        f"📝 *Записей в таблице:* `{referrals_count}`\n\n"
-        f"{EMOJI['info']} Первое число показывает общее количество приглашений. "
-        f"Второе - для проверки целостности данных.",
+        f"📝 *Записей в таблице referrals:* `{referrals_count}`\n\n"
+        f"{EMOJI['info']} Если числа совпадают - все ок!",
         parse_mode="Markdown"
     )
 
@@ -1462,8 +1529,8 @@ async def stats(message: types.Message):
         f"📊 Всего: {account_stats['total']}\n\n"
         f"👥 *ПОЛЬЗОВАТЕЛИ:*\n"
         f"👤 Всего: {stats['total_users']}\n"
-        f"👥 Рефералов: {stats['total_refs']}\n"
-        f"📊 Всего приглашений: {total_invites}\n\n"
+        f"👥 Рефералов (текущих): {stats['total_refs']}\n"
+        f"📊 Всего приглашений за всё время: {total_invites}\n\n"
         f"💰 *ПРОДАЖИ:*\n"
         f"🛒 Всего: {stats['total_purchases']}\n"
         f"💎 Звезд: {stats['total_revenue']}⭐",
