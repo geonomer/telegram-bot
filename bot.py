@@ -345,7 +345,7 @@ class Database:
     
     def create_tables(self):
         """Создает таблицы, если их нет"""
-        # Таблица пользователей
+        # Таблица пользователей с новым полем total_invited
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -354,7 +354,8 @@ class Database:
                 discount INTEGER DEFAULT 0,
                 discount_used INTEGER DEFAULT 0,
                 discount_given INTEGER DEFAULT 0,
-                join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                total_invited INTEGER DEFAULT 0
             )
         ''')
         
@@ -453,7 +454,7 @@ class Database:
     def get_user(self, user_id):
         try:
             self.cursor.execute('''
-                SELECT user_id, ref_code, ref_count, discount, discount_used, discount_given
+                SELECT user_id, ref_code, ref_count, discount, discount_used, discount_given, total_invited
                 FROM users WHERE user_id = ?
             ''', (user_id,))
             row = self.cursor.fetchone()
@@ -465,7 +466,8 @@ class Database:
                     "ref_count": row[2],
                     "discount": row[3],
                     "discount_used": bool(row[4]),
-                    "discount_given": bool(row[5])
+                    "discount_given": bool(row[5]),
+                    "total_invited": row[6] or 0
                 }
         except Exception as e:
             print(f"Ошибка получения пользователя {user_id}: {e}")
@@ -487,9 +489,11 @@ class Database:
                 VALUES (?, ?)
             ''', (referrer_id, referred_id))
             
+            # Увеличиваем оба счетчика: текущий ref_count И общий total_invited
             self.cursor.execute('''
                 UPDATE users 
-                SET ref_count = ref_count + 1 
+                SET ref_count = ref_count + 1,
+                    total_invited = total_invited + 1
                 WHERE user_id = ?
             ''', (referrer_id,))
             
@@ -690,6 +694,17 @@ class Database:
         except Exception as e:
             print(f"Ошибка получения статистики аккаунтов: {e}")
         return {'total': 0, 'sold': 0, 'available': 0}
+    
+    # ========== НОВЫЙ МЕТОД ДЛЯ ПОДСЧЕТА ВСЕХ ПРИГЛАШЕНИЙ ==========
+    def get_total_invites_alltime(self):
+        """Возвращает общее количество приглашенных людей за всё время"""
+        try:
+            self.cursor.execute('SELECT SUM(total_invited) FROM users')
+            total = self.cursor.fetchone()[0]
+            return total if total else 0
+        except Exception as e:
+            print(f"Ошибка подсчета всех приглашений: {e}")
+            return 0
     
     # ========== СТАТИСТИКА ==========
     def get_stats(self):
@@ -1134,6 +1149,28 @@ async def export_db(message: types.Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка экспорта: {e}")
 
+# ================== НОВАЯ КОМАНДА ДЛЯ ПРОВЕРКИ ВСЕХ ПРИГЛАШЕНИЙ ==================
+@dp.message_handler(commands=['total_invites'])
+async def total_invites(message: types.Message):
+    """Показывает общее количество приглашенных людей за всё время"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    total = db.get_total_invites_alltime()
+    
+    # Также получаем количество записей в таблице рефералов для проверки
+    db.cursor.execute('SELECT COUNT(*) FROM referrals')
+    referrals_count = db.cursor.fetchone()[0]
+    
+    await message.answer(
+        f"📊 *ОБЩАЯ СТАТИСТИКА ПРИГЛАШЕНИЙ*\n\n"
+        f"👥 *Всего приглашено:* `{total}` человек\n"
+        f"📝 *Записей в таблице:* `{referrals_count}`\n\n"
+        f"{EMOJI['info']} Первое число показывает общее количество приглашений. "
+        f"Второе - для проверки целостности данных.",
+        parse_mode="Markdown"
+    )
+
 # ================== ВЫБОР НОМЕРА ==================
 @dp.callback_query_handler(lambda c: c.data.startswith("num_"))
 async def process_number(call: types.CallbackQuery):
@@ -1415,6 +1452,7 @@ async def stats(message: types.Message):
     
     stats = db.get_stats()
     account_stats = db.get_account_stats()
+    total_invites = db.get_total_invites_alltime()
     
     await message.answer(
         f"{EMOJI['chart']} *СТАТИСТИКА*\n\n"
@@ -1424,7 +1462,8 @@ async def stats(message: types.Message):
         f"📊 Всего: {account_stats['total']}\n\n"
         f"👥 *ПОЛЬЗОВАТЕЛИ:*\n"
         f"👤 Всего: {stats['total_users']}\n"
-        f"👥 Рефералов: {stats['total_refs']}\n\n"
+        f"👥 Рефералов: {stats['total_refs']}\n"
+        f"📊 Всего приглашений: {total_invites}\n\n"
         f"💰 *ПРОДАЖИ:*\n"
         f"🛒 Всего: {stats['total_purchases']}\n"
         f"💎 Звезд: {stats['total_revenue']}⭐",
@@ -1465,6 +1504,7 @@ if __name__ == '__main__':
     print("📊 Экспорт базы: /exportdb")
     print("➕ Добавить аккаунт: /addaccount")
     print("💾 Сохранить сессии: /save_sessions")
+    print("📈 Всего приглашений: /total_invites")
     print("👑 Режим админа: БЕСПЛАТНО")
     print("=" * 50)
     
