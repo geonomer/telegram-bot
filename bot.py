@@ -11,7 +11,11 @@ import requests
 import threading
 import time
 import shutil
+import sys
+import fcntl
+import signal
 from datetime import datetime
+from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
@@ -20,78 +24,81 @@ from pyrogram import Client
 from pyrogram.errors import PhoneNumberInvalid, AuthKeyUnregistered, FloodWait
 from pyrogram.enums import ChatType
 
-# ================== ПРОВЕРКА И ВОССТАНОВЛЕНИЕ БАЗЫ ==================
+# ================== ПРЕДОТВРАЩЕНИЕ ДВОЙНОГО ЗАПУСКА ==================
+def prevent_multiple_instances():
+    """Предотвращает запуск нескольких экземпляров бота"""
+    lock_file = '/tmp/bot.lock'
+    try:
+        with open(lock_file, 'w') as f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                f.write(str(os.getpid()))
+                f.flush()
+                print(f"✅ Lock-файл создан. PID: {os.getpid()}")
+                def remove_lock(signum=None, frame=None):
+                    try:
+                        fcntl.flock(f, fcntl.LOCK_UN)
+                        os.unlink(lock_file)
+                        print("✅ Lock-файл удален")
+                    except: pass
+                    sys.exit(0)
+                signal.signal(signal.SIGTERM, remove_lock)
+                signal.signal(signal.SIGINT, remove_lock)
+                return True
+            except IOError:
+                print("❌ Бот уже запущен! Завершаем работу.")
+                return False
+    except Exception as e:
+        print(f"❌ Ошибка при создании lock-файла: {e}")
+        return True
+
+if not prevent_multiple_instances():
+    sys.exit(1)
+
+# ================== ПРОВЕРКА БАЗЫ ДАННЫХ ==================
 def fix_corrupted_db():
     """Проверяет и исправляет поврежденную базу данных"""
     print("\n🔧 ПРОВЕРКА ЦЕЛОСТНОСТИ БАЗЫ ДАННЫХ:")
-    
-    # Создаем папки
     os.makedirs("sessions", exist_ok=True)
     os.makedirs("data", exist_ok=True)
-    
     db_path = "data/bot.db"
-    
-    # Принудительный сброс базы если есть переменная окружения
     if os.environ.get('RESET_DB') == 'true':
         print("🗑️ Принудительное удаление базы по RESET_DB")
-        if os.path.exists(db_path):
-            os.remove(db_path)
-        if os.path.exists("data/bot.db.backup"):
-            os.remove("data/bot.db.backup")
-    
-    # Проверяем существует ли файл
+        if os.path.exists(db_path): os.remove(db_path)
+        if os.path.exists("data/bot.db.backup"): os.remove("data/bot.db.backup")
     if os.path.exists(db_path):
         size = os.path.getsize(db_path)
         print(f"📊 Размер файла БД: {size} байт")
-        
-        # Пробуем подключиться для проверки
         try:
             test_conn = sqlite3.connect(db_path)
             test_cursor = test_conn.cursor()
             test_cursor.execute("PRAGMA integrity_check")
             result = test_cursor.fetchone()
             test_conn.close()
-            
             if result and result[0] == "ok":
                 print("✅ База данных в порядке")
                 return True
             else:
                 print("❌ База данных повреждена!")
-                
         except Exception as e:
             print(f"❌ Ошибка при проверке: {e}")
-        
-        # Если база повреждена, пытаемся восстановить из бэкапа
         backup_path = "data/bot.db.backup"
         if os.path.exists(backup_path):
             print("🔄 Найден бэкап, восстанавливаем...")
             try:
-                # Проверяем бэкап
                 test_conn = sqlite3.connect(backup_path)
-                test_cursor = test_conn.cursor()
-                test_cursor.execute("PRAGMA integrity_check")
-                result = test_cursor.fetchone()
                 test_conn.close()
-                
-                if result and result[0] == "ok":
-                    shutil.copy2(backup_path, db_path)
-                    print("✅ База восстановлена из бэкапа")
-                    return True
-                else:
-                    print("❌ Бэкап тоже поврежден")
+                shutil.copy2(backup_path, db_path)
+                print("✅ База восстановлена из бэкапа")
+                return True
             except Exception as e:
                 print(f"❌ Ошибка при восстановлении из бэкапа: {e}")
-        
-        # Если бэкапа нет или он поврежден, создаем новую базу
         print("🆕 Создаем новую базу данных...")
         try:
-            # Переименовываем старую для анализа
             if os.path.exists(db_path):
                 corrupted_path = f"data/bot.db.corrupted_{int(time.time())}"
                 os.rename(db_path, corrupted_path)
                 print(f"📦 Поврежденная база сохранена как {corrupted_path}")
-            
-            # Создаем новую базу
             new_conn = sqlite3.connect(db_path)
             new_conn.close()
             print("✅ Новая база данных создана")
@@ -102,55 +109,42 @@ def fix_corrupted_db():
     else:
         print("🆕 Файл базы не существует, будет создан новый")
         return True
-
-# Вызываем проверку перед всем остальным
 fix_corrupted_db()
 
 # ================== ВОССТАНОВЛЕНИЕ БАЗЫ ИЗ ENV ==================
 def restore_db_from_env():
     """Восстанавливает базу данных из переменных окружения"""
     print("\n🔍 ПРОВЕРКА БЭКАПА БАЗЫ ДАННЫХ:")
-    
     db_backup = os.environ.get('DB_BACKUP')
     if db_backup:
         try:
             db_backup = db_backup.replace('\n', '').replace('\r', '').strip()
             db_data = base64.b64decode(db_backup)
-            
-            # Создаем резервную копию текущей БД если есть
             if os.path.exists("data/bot.db"):
-                # Проверяем текущую БД
                 try:
                     test_conn = sqlite3.connect("data/bot.db")
                     test_conn.close()
-                    # Если все ок, делаем бэкап
                     shutil.copy2("data/bot.db", "data/bot.db.prev")
                     print("📦 Создана резервная копия текущей БД")
                 except:
                     print("⚠️ Текущая БД повреждена, будет заменена")
-            
             with open("data/bot.db", "wb") as f:
                 f.write(db_data)
-            
             print(f"✅ База данных восстановлена из бэкапа ({len(db_data)} байт)")
             return True
         except Exception as e:
             print(f"❌ Ошибка восстановления БД: {e}")
-    
     print("🆕 Будет создана новая база данных")
     return False
-
-# Пытаемся восстановить БД
 restore_db_from_env()
 
-# ================== ФУНКЦИИ ВОССТАНОВЛЕНИЯ СЕССИЙ ==================
+# ================== ВОССТАНОВЛЕНИЕ СЕССИЙ ==================
 def restore_sessions():
     """Восстанавливает файлы сессий из переменных окружения"""
     print("\n🔍 ПРОВЕРКА СЕССИЙ В ENV:")
     os.makedirs("sessions", exist_ok=True)
     restored = 0
-    
-    for i in range(1, 10):  # Проверяем до 10 сессий
+    for i in range(1, 10):
         session_data = os.environ.get(f'SESSION_{i}')
         if session_data:
             try:
@@ -164,12 +158,10 @@ def restore_sessions():
                 restored += 1
             except Exception as e:
                 print(f"❌ Ошибка восстановления session_{i}: {e}")
-    
     print(f"✅ Восстановлено {restored} сессий из ENV")
     return restored
 
 def check_sessions():
-    """Проверяет наличие и валидность файлов сессий"""
     print("\n🔍 ПРОВЕРКА ФАЙЛОВ СЕССИЙ:")
     try:
         files = os.listdir("sessions")
@@ -180,30 +172,40 @@ def check_sessions():
             print(f"  - {f} ({size} байт)")
     except Exception as e:
         print(f"❌ Ошибка при проверке папки sessions: {e}")
-    
     print("=" * 50)
-
 restore_sessions()
 check_sessions()
 
 # ================== ФУНКЦИЯ ПИНГА ==================
 def self_ping():
-    """Пингует самого себя каждые 10 минут"""
     def ping():
-        url = os.environ.get('RENDER_EXTERNAL_URL', 'https://telegram-bot.onrender.com')
+        url = os.environ.get('RENDER_EXTERNAL_URL', 'https://telegram-bot.onrender.com').rstrip('/')
+        health_url = f"{url}/health"
         while True:
             try:
-                response = requests.get(f"{url}/health", timeout=5)
+                response = requests.get(health_url, timeout=5)
                 print(f"✅ Self-ping successful at {time.strftime('%H:%M:%S')} - {response.status_code}")
-            except Exception as e:
-                print(f"❌ Self-ping failed: {e}")
+            except: pass
             time.sleep(600)
-    
     thread = threading.Thread(target=ping, daemon=True)
     thread.start()
     print("✅ Self-ping thread started")
-
 self_ping()
+
+# ================== HEALTH CHECK ==================
+async def health_check(request):
+    return web.Response(text="OK", status=200)
+async def start_health_server():
+    app = web.Application()
+    app.router.add_get('/health', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 10000)
+    await site.start()
+    print("✅ Health check server started on port 10000")
+loop = asyncio.new_event_loop()
+threading.Thread(target=loop.run_forever, daemon=True).start()
+asyncio.run_coroutine_threadsafe(start_health_server(), loop)
 
 # ================== НАСТРОЙКИ ==================
 TOKEN = os.environ.get('TOKEN', "8054814092:AAEVkB2fThqWSL_fwoNFZ7oQ7Dtjwr4wNt0")
@@ -214,13 +216,16 @@ API_HASH = os.environ.get('API_HASH', "67cf40314dc0f31534b4b7feeae39242")
 PRICE_STARS = 149
 DISCOUNT_STARS = 50
 
-FLAGS = {
-    "us": "🇺🇸", 
-    "ru": "🇷🇺", 
-    "gb": "🇬🇧",
-    "mm": "🇲🇲"
-}
+# ================== НАСТРОЙКИ КАНАЛА ==================
+REQUIRED_CHANNELS = [
+    {
+        "url": "https://t.me/Geo_Nomer_Store",
+        "username": "@Geo_Nomer_Store",
+        "name": "GeoNomer | Главный канал"
+    }
+]
 
+FLAGS = { "us": "🇺🇸", "ru": "🇷🇺", "gb": "🇬🇧", "mm": "🇲🇲" }
 EMOJI = {
     "success": "✅", "error": "❌", "wait": "⏳", "money": "💰",
     "star": "⭐", "phone": "📱", "referral": "👥", "support": "📞",
@@ -229,13 +234,13 @@ EMOJI = {
     "unlock": "🔓", "discount": "🏷️", "payment": "💳", "link": "🔗",
     "info": "ℹ️", "star2": "✨", "copy": "📋", "arrow": "👉",
     "key": "🔑", "guard": "🛡️", "settings": "⚙️", "check": "✔️",
-    "vpn": "🌐", "wait2": "⏰", "alert": "⚠️"
+    "vpn": "🌐", "wait2": "⏰", "alert": "⚠️", "stats": "📊", "total": "📈"
 }
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
 
-# ================== БАЗА ДАННЫХ SQLITE ==================
+# ================== БАЗА ДАННЫХ ==================
 class Database:
     def __init__(self):
         self.db_path = "data/bot.db"
@@ -244,21 +249,15 @@ class Database:
         self.max_retries = 3
         self.connect_with_retry()
         self.create_tables()
-        
-        # Проверяем и добавляем поле total_invited если его нет
         self.migrate_database()
-        
         print("✅ База данных SQLite инициализирована")
-    
+
     def connect_with_retry(self):
-        """Подключается к базе с повторными попытками"""
         for attempt in range(self.max_retries):
             try:
                 self.conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=20)
                 self.conn.row_factory = sqlite3.Row
                 self.cursor = self.conn.cursor()
-                
-                # Проверяем целостность
                 self.cursor.execute("PRAGMA integrity_check")
                 result = self.cursor.fetchone()
                 if result and result[0] == "ok":
@@ -266,110 +265,75 @@ class Database:
                     return True
                 else:
                     raise sqlite3.DatabaseError("Database integrity check failed")
-                    
             except sqlite3.DatabaseError as e:
                 print(f"❌ Ошибка БД (попытка {attempt + 1}): {e}")
-                
                 if attempt < self.max_retries - 1:
-                    # Пробуем восстановить
                     self.recover_database()
                     time.sleep(2)
                 else:
-                    # Создаем новую базу
                     self.create_new_database()
-        
         return False
-    
+
     def recover_database(self):
-        """Пытается восстановить поврежденную базу"""
         print("🔄 Попытка восстановления базы данных...")
-        
         backup_path = "data/bot.db.backup"
-        
-        # Если есть бэкап, пробуем его
         if os.path.exists(backup_path):
             try:
-                # Проверяем бэкап
                 test_conn = sqlite3.connect(backup_path)
                 test_conn.close()
                 shutil.copy2(backup_path, self.db_path)
                 print("✅ База восстановлена из бэкапа")
                 return True
-            except:
-                pass
-        
-        # Пробуем восстановить через SQL дамп
+            except: pass
         try:
-            # Читаем поврежденную базу
             corrupted_conn = sqlite3.connect(self.db_path)
-            corrupted_conn.text_factory = bytes  # Читаем как байты для обхода ошибок
-            
-            # Создаем дамп
+            corrupted_conn.text_factory = bytes
             with open('data/dump.sql', 'w') as f:
                 for line in corrupted_conn.iterdump():
                     try:
-                        # Пытаемся декодировать строку
                         if isinstance(line, bytes):
                             line = line.decode('utf-8', errors='ignore')
                         f.write('%s\n' % line)
-                    except:
-                        continue
-            
+                    except: continue
             corrupted_conn.close()
-            
-            # Создаем новую базу из дампа
             os.rename(self.db_path, self.db_path + ".old")
             new_conn = sqlite3.connect(self.db_path)
             with open('data/dump.sql', 'r') as f:
-                sql_script = f.read()
-                new_conn.executescript(sql_script)
+                new_conn.executescript(f.read())
             new_conn.close()
-            
             print("✅ База восстановлена через SQL дамп")
             return True
         except Exception as e:
             print(f"❌ Ошибка восстановления: {e}")
             return False
-    
+
     def create_new_database(self):
-        """Создает новую базу данных"""
         print("🆕 Создание новой базы данных...")
-        
-        # Сохраняем старую базу для анализа
         if os.path.exists(self.db_path):
             corrupted_path = f"data/bot.db.corrupted_{int(time.time())}"
             os.rename(self.db_path, corrupted_path)
             print(f"📦 Поврежденная база сохранена как {corrupted_path}")
-        
-        # Создаем новую
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=20)
         self.conn.row_factory = sqlite3.Row
         self.cursor = self.conn.cursor()
         print("✅ Новая база данных создана")
-    
+
     def migrate_database(self):
-        """Добавляет новые поля в существующую таблицу"""
         try:
-            # Проверяем, есть ли поле total_invited
             self.cursor.execute("PRAGMA table_info(users)")
             columns = [column[1] for column in self.cursor.fetchall()]
-            
             if 'total_invited' not in columns:
                 print("🔄 Добавляем поле total_invited в таблицу users...")
                 self.cursor.execute('ALTER TABLE users ADD COLUMN total_invited INTEGER DEFAULT 0')
                 self.conn.commit()
                 print("✅ Поле total_invited добавлено")
-                
-                # Обновляем существующие записи: total_invited = ref_count
                 self.cursor.execute('UPDATE users SET total_invited = ref_count')
                 self.conn.commit()
                 print(f"✅ Обновлено {self.cursor.rowcount} записей")
         except Exception as e:
             print(f"⚠️ Ошибка при миграции: {e}")
-    
+
     def create_tables(self):
-        """Создает таблицы, если их нет"""
-        # Таблица пользователей
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -381,8 +345,6 @@ class Database:
                 join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        
-        # Таблица рефералов
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS referrals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -393,8 +355,6 @@ class Database:
                 FOREIGN KEY (referred_id) REFERENCES users(user_id)
             )
         ''')
-        
-        # Таблица покупок
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS purchases (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -406,8 +366,6 @@ class Database:
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
         ''')
-        
-        # Таблица для аккаунтов
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS accounts (
                 account_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -426,8 +384,6 @@ class Database:
                 FOREIGN KEY (current_user) REFERENCES users(user_id)
             )
         ''')
-        
-        # Таблица для истории использования аккаунтов
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS account_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -439,8 +395,6 @@ class Database:
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
         ''')
-        
-        # Таблица для сессий (base64)
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS sessions (
                 account_id INTEGER PRIMARY KEY,
@@ -449,275 +403,161 @@ class Database:
                 FOREIGN KEY (account_id) REFERENCES accounts(account_id)
             )
         ''')
-        
         self.conn.commit()
-    
-    # ========== МЕТОДЫ ДЛЯ ПОЛЬЗОВАТЕЛЕЙ ==========
+
+    # ----- Пользователи -----
     def add_user(self, user_id):
         try:
-            max_attempts = 10
-            for attempt in range(max_attempts):
+            for attempt in range(10):
                 ref_code = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
                 self.cursor.execute("SELECT user_id FROM users WHERE ref_code = ?", (ref_code,))
                 if not self.cursor.fetchone():
                     break
             else:
                 ref_code = f"user_{user_id}"
-            
-            self.cursor.execute('''
-                INSERT OR IGNORE INTO users (user_id, ref_code)
-                VALUES (?, ?)
-            ''', (user_id, ref_code))
+            self.cursor.execute('INSERT OR IGNORE INTO users (user_id, ref_code) VALUES (?, ?)', (user_id, ref_code))
             self.conn.commit()
             return True
         except Exception as e:
             print(f"Ошибка добавления пользователя {user_id}: {e}")
             return False
-    
+
     def get_user(self, user_id):
         try:
-            # Пробуем получить все поля, включая total_invited
             self.cursor.execute("PRAGMA table_info(users)")
             columns = [column[1] for column in self.cursor.fetchall()]
-            
             if 'total_invited' in columns:
-                self.cursor.execute('''
-                    SELECT user_id, ref_code, ref_count, discount, discount_used, discount_given, total_invited
-                    FROM users WHERE user_id = ?
-                ''', (user_id,))
+                self.cursor.execute('SELECT user_id, ref_code, ref_count, discount, discount_used, discount_given, total_invited FROM users WHERE user_id = ?', (user_id,))
                 row = self.cursor.fetchone()
-                
                 if row:
                     return {
-                        "user_id": row[0],
-                        "ref_code": row[1],
-                        "ref_count": row[2],
-                        "discount": row[3],
-                        "discount_used": bool(row[4]),
-                        "discount_given": bool(row[5]),
+                        "user_id": row[0], "ref_code": row[1], "ref_count": row[2],
+                        "discount": row[3], "discount_used": bool(row[4]), "discount_given": bool(row[5]),
                         "total_invited": row[6] or 0
                     }
             else:
-                # Если поля нет, получаем без него
-                self.cursor.execute('''
-                    SELECT user_id, ref_code, ref_count, discount, discount_used, discount_given
-                    FROM users WHERE user_id = ?
-                ''', (user_id,))
+                self.cursor.execute('SELECT user_id, ref_code, ref_count, discount, discount_used, discount_given FROM users WHERE user_id = ?', (user_id,))
                 row = self.cursor.fetchone()
-                
                 if row:
                     return {
-                        "user_id": row[0],
-                        "ref_code": row[1],
-                        "ref_count": row[2],
-                        "discount": row[3],
-                        "discount_used": bool(row[4]),
-                        "discount_given": bool(row[5]),
-                        "total_invited": row[2]  # Используем ref_count как запасной вариант
+                        "user_id": row[0], "ref_code": row[1], "ref_count": row[2],
+                        "discount": row[3], "discount_used": bool(row[4]), "discount_given": bool(row[5]),
+                        "total_invited": row[2]
                     }
         except Exception as e:
             print(f"Ошибка получения пользователя {user_id}: {e}")
-        
         return None
-    
-    # ========== МЕТОДЫ ДЛЯ РЕФЕРАЛОВ ==========
+
+    # ----- Рефералы -----
     def add_referral(self, referrer_id, referred_id):
         try:
+            if referrer_id == referred_id: return False
             self.cursor.execute("SELECT id FROM referrals WHERE referred_id = ?", (referred_id,))
-            if self.cursor.fetchone():
-                return False
-            
-            if referrer_id == referred_id:
-                return False
-            
-            self.cursor.execute('''
-                INSERT INTO referrals (referrer_id, referred_id)
-                VALUES (?, ?)
-            ''', (referrer_id, referred_id))
-            
-            # Проверяем, есть ли поле total_invited
+            if self.cursor.fetchone(): return False
+            self.cursor.execute('INSERT INTO referrals (referrer_id, referred_id) VALUES (?, ?)', (referrer_id, referred_id))
             self.cursor.execute("PRAGMA table_info(users)")
             columns = [column[1] for column in self.cursor.fetchall()]
-            
             if 'total_invited' in columns:
-                # Если поле есть - обновляем оба счетчика
-                self.cursor.execute('''
-                    UPDATE users 
-                    SET ref_count = ref_count + 1,
-                        total_invited = total_invited + 1
-                    WHERE user_id = ?
-                ''', (referrer_id,))
+                self.cursor.execute('UPDATE users SET ref_count = ref_count + 1, total_invited = total_invited + 1 WHERE user_id = ?', (referrer_id,))
             else:
-                # Если поля нет - только ref_count
-                self.cursor.execute('''
-                    UPDATE users 
-                    SET ref_count = ref_count + 1
-                    WHERE user_id = ?
-                ''', (referrer_id,))
-            
-            # Проверка на скидку
-            self.cursor.execute('''
-                SELECT ref_count FROM users WHERE user_id = ?
-            ''', (referrer_id,))
+                self.cursor.execute('UPDATE users SET ref_count = ref_count + 1 WHERE user_id = ?', (referrer_id,))
+            self.cursor.execute('SELECT ref_count FROM users WHERE user_id = ?', (referrer_id,))
             ref_count_row = self.cursor.fetchone()
-            if ref_count_row:
-                ref_count = ref_count_row[0]
-                if ref_count >= 5:
-                    self.cursor.execute('''
-                        UPDATE users 
-                        SET discount = ?, discount_given = 1 
-                        WHERE user_id = ? AND discount_given = 0
-                    ''', (DISCOUNT_STARS, referrer_id))
-            
+            if ref_count_row and ref_count_row[0] >= 5:
+                self.cursor.execute('UPDATE users SET discount = ?, discount_given = 1 WHERE user_id = ? AND discount_given = 0', (DISCOUNT_STARS, referrer_id))
             self.conn.commit()
             return True
         except Exception as e:
             print(f"Ошибка добавления реферала: {e}")
             return False
-    
-    # ========== МЕТОДЫ ДЛЯ ПОКУПОК ==========
+
+    # ----- Покупки -----
     def add_purchase(self, user_id, account_number, phone, price):
         try:
-            self.cursor.execute('''
-                INSERT INTO purchases (user_id, account_number, phone, price)
-                VALUES (?, ?, ?, ?)
-            ''', (user_id, account_number, phone, price))
+            self.cursor.execute('INSERT INTO purchases (user_id, account_number, phone, price) VALUES (?, ?, ?, ?)', (user_id, account_number, phone, price))
             self.conn.commit()
         except Exception as e:
             print(f"Ошибка добавления покупки: {e}")
-    
+
     def use_discount(self, user_id):
-        self.cursor.execute('''
-            UPDATE users SET discount_used = 1 WHERE user_id = ?
-        ''', (user_id,))
+        self.cursor.execute('UPDATE users SET discount_used = 1 WHERE user_id = ?', (user_id,))
         self.conn.commit()
-    
-    # ========== МЕТОДЫ ДЛЯ АККАУНТОВ ==========
+
+    # ----- Аккаунты -----
     def add_account(self, account_data):
-        """Добавляет новый аккаунт в БД"""
         try:
             self.cursor.execute('''
-                INSERT OR REPLACE INTO accounts 
+                INSERT OR REPLACE INTO accounts
                 (account_number, phone, country, country_name, api_id, api_hash, session_file, description)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                account_data['account_number'],
-                account_data['phone'],
-                account_data['country'],
-                account_data['country_name'],
-                account_data['api_id'],
-                account_data['api_hash'],
-                account_data['session_file'],
-                account_data.get('description', '')
-            ))
+            ''', (account_data['account_number'], account_data['phone'], account_data['country'],
+                  account_data['country_name'], account_data['api_id'], account_data['api_hash'],
+                  account_data['session_file'], account_data.get('description', '')))
             self.conn.commit()
             return True
         except Exception as e:
             print(f"Ошибка добавления аккаунта: {e}")
             return False
-    
+
     def get_all_accounts(self):
-        """Получает все аккаунты из БД"""
         try:
-            self.cursor.execute('''
-                SELECT * FROM accounts WHERE is_active = 1 ORDER BY account_id
-            ''')
+            self.cursor.execute('SELECT * FROM accounts WHERE is_active = 1 ORDER BY account_id')
             rows = self.cursor.fetchall()
-            
             accounts = {}
             for row in rows:
-                accounts[str(row[1])] = {  # account_number как ключ
-                    'phone': row[2],
-                    'country': row[3],
-                    'country_name': row[4],
-                    'api_id': row[5],
-                    'api_hash': row[6],
-                    'session_file': row[7],
-                    'description': row[8],
-                    'in_use': bool(row[9]),
-                    'current_user': row[10],
-                    'purchase_date': row[11],
-                    'is_active': bool(row[12])
+                accounts[str(row[1])] = {
+                    'phone': row[2], 'country': row[3], 'country_name': row[4],
+                    'api_id': row[5], 'api_hash': row[6], 'session_file': row[7],
+                    'description': row[8], 'in_use': bool(row[9]), 'current_user': row[10],
+                    'purchase_date': row[11], 'is_active': bool(row[12])
                 }
             return accounts
         except Exception as e:
             print(f"Ошибка получения аккаунтов: {e}")
             return {}
-    
+
     def get_account(self, account_number):
-        """Получает аккаунт по номеру"""
         try:
-            self.cursor.execute('''
-                SELECT * FROM accounts WHERE account_number = ? AND is_active = 1
-            ''', (account_number,))
+            self.cursor.execute('SELECT * FROM accounts WHERE account_number = ? AND is_active = 1', (account_number,))
             row = self.cursor.fetchone()
-            
             if row:
                 return {
-                    'phone': row[2],
-                    'country': row[3],
-                    'country_name': row[4],
-                    'api_id': row[5],
-                    'api_hash': row[6],
-                    'session_file': row[7],
-                    'description': row[8],
-                    'in_use': bool(row[9]),
-                    'current_user': row[10],
+                    'phone': row[2], 'country': row[3], 'country_name': row[4],
+                    'api_id': row[5], 'api_hash': row[6], 'session_file': row[7],
+                    'description': row[8], 'in_use': bool(row[9]), 'current_user': row[10],
                     'purchase_date': row[11]
                 }
         except Exception as e:
             print(f"Ошибка получения аккаунта: {e}")
         return None
-    
+
     def update_account_status(self, account_number, user_id, in_use=True):
-        """Обновляет статус использования аккаунта"""
         try:
-            self.cursor.execute('''
-                UPDATE accounts 
-                SET in_use = ?, current_user = ?, purchase_date = CURRENT_TIMESTAMP
-                WHERE account_number = ?
-            ''', (1 if in_use else 0, user_id, account_number))
-            
-            # Добавляем запись в историю
-            self.cursor.execute('''
-                INSERT INTO account_history (account_id, user_id, action)
-                SELECT account_id, ?, ? FROM accounts WHERE account_number = ?
-            ''', (user_id, 'purchase' if in_use else 'release', account_number))
-            
+            self.cursor.execute('UPDATE accounts SET in_use = ?, current_user = ?, purchase_date = CURRENT_TIMESTAMP WHERE account_number = ?', (1 if in_use else 0, user_id, account_number))
+            self.cursor.execute('INSERT INTO account_history (account_id, user_id, action) SELECT account_id, ?, ? FROM accounts WHERE account_number = ?', (user_id, 'purchase' if in_use else 'release', account_number))
             self.conn.commit()
             return True
         except Exception as e:
             print(f"Ошибка обновления статуса: {e}")
             return False
-    
+
     def save_session(self, account_number, session_data):
-        """Сохраняет сессию аккаунта в БД"""
         try:
-            self.cursor.execute('''
-                INSERT OR REPLACE INTO sessions (account_id, session_data, last_updated)
-                SELECT account_id, ?, CURRENT_TIMESTAMP FROM accounts WHERE account_number = ?
-            ''', (session_data, account_number))
+            self.cursor.execute('INSERT OR REPLACE INTO sessions (account_id, session_data, last_updated) SELECT account_id, ?, CURRENT_TIMESTAMP FROM accounts WHERE account_number = ?', (session_data, account_number))
             self.conn.commit()
             return True
         except Exception as e:
             print(f"Ошибка сохранения сессии: {e}")
             return False
-    
+
     def load_sessions_from_db(self):
-        """Загружает все сессии из БД и восстанавливает файлы"""
         try:
-            self.cursor.execute('''
-                SELECT a.account_number, a.session_file, s.session_data 
-                FROM sessions s
-                JOIN accounts a ON s.account_id = a.account_id
-            ''')
+            self.cursor.execute('SELECT a.account_number, a.session_file, s.session_data FROM sessions s JOIN accounts a ON s.account_id = a.account_id')
             rows = self.cursor.fetchall()
-            
             restored = 0
             for row in rows:
                 account_number, session_file, session_data = row
                 try:
-                    # Декодируем и сохраняем файл
                     decoded = base64.b64decode(session_data)
                     with open(f"{session_file}.session", 'wb') as f:
                         f.write(decoded)
@@ -725,56 +565,38 @@ class Database:
                     restored += 1
                 except Exception as e:
                     print(f"❌ Ошибка восстановления сессии {account_number}: {e}")
-            
             return restored
         except Exception as e:
             print(f"Ошибка загрузки сессий: {e}")
             return 0
-    
+
     def get_account_stats(self):
-        """Получает статистику по аккаунтам"""
         try:
-            self.cursor.execute('''
-                SELECT 
-                    COUNT(*) as total,
-                    SUM(CASE WHEN in_use = 1 THEN 1 ELSE 0 END) as sold,
-                    SUM(CASE WHEN in_use = 0 THEN 1 ELSE 0 END) as available
-                FROM accounts WHERE is_active = 1
-            ''')
+            self.cursor.execute('SELECT COUNT(*) as total, SUM(CASE WHEN in_use = 1 THEN 1 ELSE 0 END) as sold, SUM(CASE WHEN in_use = 0 THEN 1 ELSE 0 END) as available FROM accounts WHERE is_active = 1')
             row = self.cursor.fetchone()
-            
             if row:
-                return {
-                    'total': row[0] or 0,
-                    'sold': row[1] or 0,
-                    'available': row[2] or 0
-                }
+                return {'total': row[0] or 0, 'sold': row[1] or 0, 'available': row[2] or 0}
         except Exception as e:
             print(f"Ошибка получения статистики аккаунтов: {e}")
         return {'total': 0, 'sold': 0, 'available': 0}
-    
-    # ========== НОВЫЙ МЕТОД ДЛЯ ПОДСЧЕТА ВСЕХ ПРИГЛАШЕНИЙ ==========
+
+    # ----- Общая статистика приглашений -----
     def get_total_invites_alltime(self):
-        """Возвращает общее количество приглашенных людей за всё время"""
         try:
-            # Проверяем, есть ли поле total_invited
             self.cursor.execute("PRAGMA table_info(users)")
             columns = [column[1] for column in self.cursor.fetchall()]
-            
             if 'total_invited' in columns:
                 self.cursor.execute('SELECT SUM(total_invited) FROM users')
                 total = self.cursor.fetchone()[0]
             else:
-                # Если поля нет - считаем по таблице referrals
                 self.cursor.execute('SELECT COUNT(*) FROM referrals')
                 total = self.cursor.fetchone()[0]
-            
             return total if total else 0
         except Exception as e:
             print(f"Ошибка подсчета всех приглашений: {e}")
             return 0
-    
-    # ========== СТАТИСТИКА ==========
+
+    # ----- Общая статистика бота -----
     def get_stats(self):
         stats = {}
         try:
@@ -790,7 +612,7 @@ class Database:
         except Exception as e:
             stats = {'total_users': 0, 'total_refs': 0, 'total_purchases': 0, 'total_revenue': 0}
         return stats
-    
+
     def close(self):
         if self.conn:
             self.conn.close()
@@ -798,67 +620,26 @@ class Database:
 
 db = Database()
 
-# ================== ЗАГРУЗКА АККАУНТОВ ИЗ БД ==================
+# ================== ЗАГРУЗКА АККАУНТОВ ==================
 def init_accounts_from_db():
-    """Инициализирует аккаунты из базы данных"""
     print("\n🔍 ЗАГРУЗКА АККАУНТОВ ИЗ БД:")
-    
-    # Проверяем, есть ли аккаунты в БД
     accounts_from_db = db.get_all_accounts()
-    
     if accounts_from_db:
         print(f"✅ Загружено {len(accounts_from_db)} аккаунтов из БД")
-        
-        # Загружаем сессии
         restored = db.load_sessions_from_db()
         print(f"✅ Восстановлено {restored} сессий из БД")
-        
         return accounts_from_db
     else:
         print("🆕 База данных пуста, создаем начальные аккаунты")
-        
-        # Начальные данные аккаунтов
         initial_accounts = {
-            "1": {
-                "account_number": "1",
-                "phone": "+16188550568",
-                "country": "us",
-                "country_name": "США",
-                "api_id": API_ID,
-                "api_hash": API_HASH,
-                "session_file": "sessions/account_1",
-                "description": "Аккаунт USA, чистый, прогретый"
-            },
-            "2": {
-                "account_number": "2",
-                "phone": "+15593721842",
-                "country": "us",
-                "country_name": "США",
-                "api_id": API_ID,
-                "api_hash": API_HASH,
-                "session_file": "sessions/account_2",
-                "description": "Аккаунт USA, чистый, прогретый"
-            },
-            "3": {
-                "account_number": "3",
-                "phone": "+15399999864",
-                "country": "us",
-                "country_name": "США",
-                "api_id": API_ID,
-                "api_hash": API_HASH,
-                "session_file": "sessions/account_3",
-                "description": "Аккаунт USA, чистый, прогретый"
-            }
+            "1": { "account_number": "1", "phone": "+16188550568", "country": "us", "country_name": "США", "api_id": API_ID, "api_hash": API_HASH, "session_file": "sessions/account_1", "description": "Аккаунт USA, чистый, прогретый" },
+            "2": { "account_number": "2", "phone": "+15593721842", "country": "us", "country_name": "США", "api_id": API_ID, "api_hash": API_HASH, "session_file": "sessions/account_2", "description": "Аккаунт USA, чистый, прогретый" },
+            "3": { "account_number": "3", "phone": "+15399999864", "country": "us", "country_name": "США", "api_id": API_ID, "api_hash": API_HASH, "session_file": "sessions/account_3", "description": "Аккаунт USA, чистый, прогретый" }
         }
-        
         for num, acc_data in initial_accounts.items():
             db.add_account(acc_data)
             print(f"✅ Добавлен аккаунт {num} в БД")
-        
-        # Загружаем созданные аккаунты
         accounts_from_db = db.get_all_accounts()
-        
-        # Сохраняем существующие файлы сессий в БД
         for num in initial_accounts:
             session_file = f"sessions/account_{num}.session"
             if os.path.exists(session_file):
@@ -870,10 +651,8 @@ def init_accounts_from_db():
                         print(f"✅ Сохранена сессия аккаунта {num} в БД")
                 except Exception as e:
                     print(f"❌ Ошибка сохранения сессии {num}: {e}")
-        
         return accounts_from_db
 
-# Загружаем аккаунты
 accounts = init_accounts_from_db()
 print("=" * 50)
 
@@ -882,7 +661,7 @@ if os.path.exists("data/bot.db"):
     size = os.path.getsize("data/bot.db")
     print(f"✅ База данных создана: {size} байт")
 
-# ================== ВРЕМЕННЫЕ ДАННЫЕ ==================
+# ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
 pending_purchases = {}
 
 def get_user(user_id):
@@ -898,71 +677,57 @@ def calculate_stars_price(user_id):
         return PRICE_STARS - DISCOUNT_STARS
     return PRICE_STARS
 
-# ================== КЛАСС ДЛЯ ПОЛУЧЕНИЯ КОДА ==================
-class CodeGetter:
-    def __init__(self, session_file):
-        self.session_file = session_file
-        print(f"✅ CodeGetter готов для {session_file}")
-    
-    async def get_code(self, phone, api_id, api_hash):
+# ================== ПРОВЕРКА ПОДПИСКИ ==================
+async def check_subscriptions(user_id):
+    """Проверяет, подписан ли пользователь на все обязательные каналы"""
+    if user_id == ADMIN_ID:
+        return True
+    for channel in REQUIRED_CHANNELS:
         try:
-            print(f"🔄 Подключаюсь к {phone}...")
-            
-            session_path = f"{self.session_file}.session"
-            if not os.path.exists(session_path):
-                print(f"❌ Файл сессии {session_path} не найден")
-                return None
-            
-            app = Client(
-                name=self.session_file,
-                api_id=api_id,
-                api_hash=api_hash,
-                workdir="."
-            )
-            
-            await app.start()
-            print(f"✅ Успешно подключился!")
-            
-            me = await app.get_me()
-            print(f"👤 Аккаунт: {me.first_name}")
-            
-            # Ищем диалог с Telegram
-            telegram_chat_id = None
-            async for dialog in app.get_dialogs(limit=50):
-                chat = dialog.chat
-                if chat.first_name and "telegram" in chat.first_name.lower():
-                    telegram_chat_id = chat.id
-                    print(f"✅ Найден чат Telegram: {chat.first_name}")
-                    break
-            
-            if not telegram_chat_id:
-                print("❌ Чат Telegram не найден")
-                await app.stop()
-                return None
-            
-            # Читаем последние сообщения
-            async for msg in app.get_chat_history(telegram_chat_id, limit=20):
-                if msg and msg.text:
-                    code_match = re.search(r'(\d{5})', msg.text)
-                    if code_match:
-                        code = code_match.group(1)
-                        print(f"✅ НАЙДЕН КОД: {code}")
-                        await app.stop()
-                        return code
-            
-            print("❌ Код не найден")
-            await app.stop()
-            return None
-            
+            member = await bot.get_chat_member(chat_id=channel["username"], user_id=user_id)
+            if member.status not in ['member', 'administrator', 'creator']:
+                return False
         except Exception as e:
-            print(f"❌ Ошибка: {e}")
-            return None
+            print(f"Ошибка проверки подписки для канала {channel['username']}: {e}")
+            return False
+    return True
+
+def get_subscription_keyboard():
+    """Клавиатура для проверки подписки (с красивым текстом)"""
+    kb = InlineKeyboardMarkup(row_width=1)
+    for channel in REQUIRED_CHANNELS:
+        kb.add(InlineKeyboardButton(
+            f"📢 {channel['name']}", 
+            url=channel['url']
+        ))
+    kb.add(InlineKeyboardButton(
+        f"{EMOJI['check']} Я ПОДПИСАЛСЯ, ПРОВЕРИТЬ", 
+        callback_data="check_subs"
+    ))
+    return kb
+
+# ================== ДЕКОРАТОР ПРОВЕРКИ ПОДПИСКИ ==================
+def subscription_required(handler):
+    async def wrapper(message: types.Message):
+        user_id = message.from_user.id
+        is_subscribed = await check_subscriptions(user_id)
+        if not is_subscribed:
+            text = (
+                f"{EMOJI['guard']} *Доступ к боту ограничен*\n\n"
+                f"Для использования бота необходимо подписаться на наш канал:\n\n"
+                f"👉 [{REQUIRED_CHANNELS[0]['name']}]({REQUIRED_CHANNELS[0]['url']})\n\n"
+                f"Это бесплатно и занимает всего секунду. После подписки нажмите кнопку проверки ниже."
+            )
+            await message.answer(text, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=get_subscription_keyboard())
+            return
+        return await handler(message)
+    return wrapper
 
 # ================== КЛАВИАТУРЫ ==================
 def get_main_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(KeyboardButton("📱 Номера"), KeyboardButton("💰 Цены"))
-    kb.add(KeyboardButton("👥 Рефералы"), KeyboardButton("📞 Поддержка"))
+    kb.add(KeyboardButton("👥 Мои рефералы"), KeyboardButton("📞 Поддержка"))
     kb.add(KeyboardButton("❓ Помощь"))
     return kb
 
@@ -992,38 +757,66 @@ async def start(message: types.Message):
     user_id = message.from_user.id
     args = message.get_args()
     
-    user = get_user(user_id)
+    # Сначала проверяем подписку
+    if not await check_subscriptions(user_id):
+        text = (
+            f"{EMOJI['guard']} *Добро пожаловать!*\n\n"
+            f"Для начала работы необходимо подписаться на наш канал:\n\n"
+            f"👉 [{REQUIRED_CHANNELS[0]['name']}]({REQUIRED_CHANNELS[0]['url']})\n\n"
+            f"После подписки нажмите кнопку ниже."
+        )
+        await message.answer(text, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=get_subscription_keyboard())
+        return
     
+    user = get_user(user_id)
     db.cursor.execute("SELECT referrer_id FROM referrals WHERE referred_id = ?", (user_id,))
     is_already_referred = db.cursor.fetchone()
     
     if args and not is_already_referred:
         db.cursor.execute("SELECT user_id FROM users WHERE ref_code = ?", (args,))
         result = db.cursor.fetchone()
-        
         if result and result[0] != user_id:
             referrer_id = result[0]
-            if db.add_referral(referrer_id, user_id):
-                await message.answer(f"{EMOJI['success']} Вы перешли по реферальной ссылке!")
+            # Проверяем, подписан ли реферер на канал
+            if await check_subscriptions(referrer_id):
+                if db.add_referral(referrer_id, user_id):
+                    await message.answer(f"{EMOJI['success']} Вы перешли по реферальной ссылке!")
+            else:
+                await message.answer(f"{EMOJI['warning']} Пригласивший вас пользователь не подписан на канал. Реферал не засчитан.")
         elif result and result[0] == user_id:
             await message.answer(f"{EMOJI['warning']} Нельзя стать рефералом по своей ссылке!")
     elif args and is_already_referred:
         await message.answer(f"{EMOJI['info']} Вы уже чей-то реферал")
     
     text = (
-        f"{EMOJI['phone']} *Добро пожаловать!*\n\n"
-        f"{EMOJI['star']} *Цена:* {PRICE_STARS} звёзд\n"
-        f"{EMOJI['referral']} *Рефералы:* 5 друзей = скидка {DISCOUNT_STARS} {EMOJI['star']}"
+        f"{EMOJI['phone']} *Добро пожаловать в GeoNomer!*\n\n"
+        f"{EMOJI['star']} *Цена номера:* {PRICE_STARS} звёзд\n"
+        f"{EMOJI['referral']} *Рефералы:* 5 друзей = скидка {DISCOUNT_STARS}⭐\n\n"
+        f"👇 Используйте кнопки меню для навигации"
     )
     await message.reply(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
-@dp.message_handler(lambda msg: msg.text == "👥 Рефералы")
+# ================== ОБРАБОТЧИК ПРОВЕРКИ ПОДПИСКИ ==================
+@dp.callback_query_handler(lambda c: c.data == "check_subs")
+async def check_subs_callback(call: types.CallbackQuery):
+    user_id = call.from_user.id
+    is_subscribed = await check_subscriptions(user_id)
+    if is_subscribed:
+        await call.message.delete()
+        await start(call.message)
+        await call.answer("✅ Подписка подтверждена! Добро пожаловать.")
+    else:
+        await call.answer("❌ Вы еще не подписались! Подпишитесь и нажмите снова.", show_alert=True)
+
+# ================== ОСНОВНЫЕ ОБРАБОТЧИКИ ==================
+@dp.message_handler(lambda msg: msg.text == "👥 Мои рефералы")
+@subscription_required
 async def referrals(msg: types.Message):
     user = get_user(msg.from_user.id)
     bot_name = (await bot.get_me()).username
     link = f"https://t.me/{bot_name}?start={user['ref_code']}"
     
-    progress = "🟩" * user['ref_count'] + "⬜" * (5 - user['ref_count'])
+    progress_to_discount = "🟩" * min(user['ref_count'], 5) + "⬜" * (5 - min(user['ref_count'], 5))
     
     if user["discount"] > 0 and not user["discount_used"]:
         discount_status = f"{EMOJI['success']} *Доступна*"
@@ -1036,108 +829,85 @@ async def referrals(msg: types.Message):
         discount_text = f"👥 Пригласите ещё {5 - user['ref_count']} друзей для получения скидки"
     
     text = (
-        f"🎁 *РЕФЕРАЛЬНАЯ ПРОГРАММА*\n\n"
-        f"{EMOJI['star2']} *Приглашайте друзей и получайте скидки!*\n\n"
-        f"{EMOJI['link']} *Твоя ссылка:*\n"
+        f"🎁 *МОЯ РЕФЕРАЛЬНАЯ ПРОГРАММА*\n\n"
+        f"{EMOJI['link']} *Твоя ссылка для приглашения:*\n"
         f"`{link}`\n\n"
-        f"{EMOJI['arrow']} *Для iPhone:* если ссылка не нажимается, используй кнопку ниже 👇\n\n"
-        f"{EMOJI['chart']} *Прогресс:*\n"
-        f"{progress}  `{user['ref_count']}/5`\n\n"
+        f"{EMOJI['stats']} *Твоя статистика:*\n"
+        f"• {EMOJI['total']} *Всего приглашено:* `{user['total_invited']}` чел.\n"
+        f"• {EMOJI['referral']} *Активно для скидки:* `{user['ref_count']}` чел.\n\n"
+        f"{EMOJI['chart']} *Прогресс до скидки (5 чел.):*\n"
+        f"{progress_to_discount}\n\n"
         f"🏷️ *Статус скидки:* {discount_status}\n"
         f"ℹ️ {discount_text}\n\n"
         f"📌 *Как это работает:*\n"
         f"1️⃣ Отправьте ссылку друзьям\n"
         f"2️⃣ Когда 5 друзей перейдут по ней\n"
-        f"3️⃣ Получите скидку {DISCOUNT_STARS}⭐ на следующий заказ!\n\n"
-        f"{EMOJI['support']} *Поддержка:* @dan4ezHelp"
+        f"3️⃣ Получите скидку {DISCOUNT_STARS}⭐ на следующий заказ!"
     )
     
     keyboard = InlineKeyboardMarkup(row_width=1)
-    keyboard.add(InlineKeyboardButton(
-        f"{EMOJI['link']} Открыть реферальную ссылку", 
-        url=link
-    ))
-    
+    keyboard.add(InlineKeyboardButton(f"{EMOJI['link']} Поделиться ссылкой", url=f"https://t.me/share/url?url={link}"))
     await msg.answer(text, parse_mode="Markdown", reply_markup=keyboard)
 
 @dp.message_handler(lambda msg: msg.text == "💰 Цены")
+@subscription_required
 async def prices(msg: types.Message):
     price = calculate_stars_price(msg.from_user.id)
-    
     text = f"{EMOJI['money']} *Доступные номера:*\n\n"
     for num, acc in accounts.items():
         flag = FLAGS.get(acc["country"], "🌍")
         status = f"{EMOJI['unlock']}" if not acc["in_use"] else f"{EMOJI['lock']}"
         text += f"{flag} `{acc['phone']}` {status}\n"
         text += f"{EMOJI['info']} *{acc['description']}*\n\n"
-    
     text += f"\n{EMOJI['star']} *Твоя цена:* {price} звёзд"
     await msg.answer(text, parse_mode="Markdown")
 
 @dp.message_handler(lambda msg: msg.text == "📱 Номера")
+@subscription_required
 async def numbers(msg: types.Message):
     await msg.answer("📱 Доступные номера:", reply_markup=get_numbers_keyboard())
 
 @dp.message_handler(lambda msg: msg.text == "📞 Поддержка")
+@subscription_required
 async def support(msg: types.Message):
-    await msg.answer("📞 @dan4ezHelp")
+    await msg.answer("📞 Связь с поддержкой: @dan4ezHelp")
 
 @dp.message_handler(lambda msg: msg.text == "❓ Помощь")
+@subscription_required
 async def help_cmd(msg: types.Message):
     help_text = (
-        f"{EMOJI['help']} *Помощь*\n\n"
-        f"1️⃣ {EMOJI['phone']} Нажми *'Номера'*\n"
-        f"2️⃣ Выбери номер\n"
-        f"3️⃣ {EMOJI['star']} Оплати\n"
-        f"4️⃣ {EMOJI['code']} Нажми кнопку *'Получить код'*\n"
-        f"5️⃣ ✅ Войди в аккаунт\n\n"
-        f"{EMOJI['referral']} 5 друзей = скидка {DISCOUNT_STARS}⭐"
+        f"{EMOJI['help']} *Помощь по использованию*\n\n"
+        f"1️⃣ {EMOJI['phone']} Нажми **'Номера'**\n"
+        f"2️⃣ Выбери понравившийся номер\n"
+        f"3️⃣ {EMOJI['star']} Оплати звездами\n"
+        f"4️⃣ {EMOJI['code']} Нажми **'Получить код'**\n"
+        f"5️⃣ ✅ Войди в аккаунт с полученным кодом\n\n"
+        f"{EMOJI['referral']} Приглашай друзей и получай скидки!"
     )
     await msg.answer(help_text, parse_mode="Markdown")
 
 # ================== АДМИН КОМАНДЫ ==================
 @dp.message_handler(commands=['addaccount'])
 async def add_account_cmd(message: types.Message):
-    """Добавляет новый аккаунт в БД (только для админа)"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
+    if message.from_user.id != ADMIN_ID: return
     args = message.get_args().split()
     if len(args) < 3:
-        await message.answer(
-            f"{EMOJI['error']} Использование:\n"
-            f"/addaccount номер телефон страна [описание]\n\n"
-            f"Пример: /addaccount 4 +1234567890 США Аккаунт USA"
-        )
+        await message.answer(f"{EMOJI['error']} Использование: /addaccount номер телефон страна [описание]")
         return
-    
     account_number = args[0]
     phone = args[1]
     country_name = args[2]
     description = ' '.join(args[3:]) if len(args) > 3 else "Новый аккаунт"
-    
-    # Определяем код страны
-    country_code = "us"  # По умолчанию
-    if "сша" in country_name.lower():
-        country_code = "us"
-    elif "великобрит" in country_name.lower() or "англ" in country_name.lower():
-        country_code = "gb"
-    elif "рос" in country_name.lower() or "ру" in country_name.lower():
-        country_code = "ru"
-    
+    country_code = "us"
+    if "сша" in country_name.lower(): country_code = "us"
+    elif "великобрит" in country_name.lower() or "англ" in country_name.lower(): country_code = "gb"
+    elif "рос" in country_name.lower() or "ру" in country_name.lower(): country_code = "ru"
     account_data = {
-        "account_number": account_number,
-        "phone": phone,
-        "country": country_code,
-        "country_name": country_name,
-        "api_id": API_ID,
-        "api_hash": API_HASH,
-        "session_file": f"sessions/account_{account_number}",
-        "description": description
+        "account_number": account_number, "phone": phone, "country": country_code,
+        "country_name": country_name, "api_id": API_ID, "api_hash": API_HASH,
+        "session_file": f"sessions/account_{account_number}", "description": description
     }
-    
     if db.add_account(account_data):
-        # Обновляем локальный словарь
         global accounts
         accounts = db.get_all_accounts()
         await message.answer(f"{EMOJI['success']} Аккаунт {account_number} добавлен в БД")
@@ -1146,12 +916,8 @@ async def add_account_cmd(message: types.Message):
 
 @dp.message_handler(commands=['save_sessions'])
 async def save_sessions_cmd(message: types.Message):
-    """Сохраняет все текущие сессии в БД"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
+    if message.from_user.id != ADMIN_ID: return
     await message.answer("🔄 Сохраняю сессии в БД...")
-    
     saved = 0
     for num in accounts:
         session_file = f"sessions/account_{num}.session"
@@ -1164,19 +930,13 @@ async def save_sessions_cmd(message: types.Message):
                         saved += 1
             except Exception as e:
                 print(f"❌ Ошибка сохранения сессии {num}: {e}")
-    
     await message.answer(f"✅ Сохранено {saved} сессий в БД")
 
 @dp.message_handler(commands=['exportdb'])
 async def export_db(message: types.Message):
-    """Экспортирует всю базу данных"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
+    if message.from_user.id != ADMIN_ID: return
     await message.answer("🔄 Экспортирую базу данных...")
-    
     try:
-        # Сохраняем сессии в БД перед экспортом
         for num in accounts:
             session_file = f"sessions/account_{num}.session"
             if os.path.exists(session_file):
@@ -1184,27 +944,14 @@ async def export_db(message: types.Message):
                     session_data = f.read()
                     session_b64 = base64.b64encode(session_data).decode('utf-8')
                     db.save_session(num, session_b64)
-        
-        # Экспортируем БД
         if os.path.exists("data/bot.db"):
             with open("data/bot.db", "rb") as f:
                 db_data = f.read()
                 db_b64 = base64.b64encode(db_data).decode('utf-8')
-                
-                # Также создаем дамп SQL для бэкапа
                 backup_sql = []
                 for line in db.conn.iterdump():
                     backup_sql.append(line)
-                
-                await message.answer(
-                    f"✅ База экспортирована!\n\n"
-                    f"📊 Размер: {len(db_b64)} символов\n\n"
-                    f"📋 Скопируй строки в переменные окружения:\n"
-                    f"• DB_BACKUP (base64 всей БД)\n"
-                    f"• SQL_BACKUP (SQL дамп)\n\n"
-                    f"(полный текст в логах Render)"
-                )
-                
+                await message.answer(f"✅ База экспортирована! (Данные в логах Render)")
                 print("\n" + "="*50)
                 print("DB_BACKUP = ")
                 print(db_b64)
@@ -1217,24 +964,16 @@ async def export_db(message: types.Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка экспорта: {e}")
 
-# ================== НОВАЯ КОМАНДА ДЛЯ ПРОВЕРКИ ВСЕХ ПРИГЛАШЕНИЙ ==================
 @dp.message_handler(commands=['total_invites'])
 async def total_invites(message: types.Message):
-    """Показывает общее количество приглашенных людей за всё время"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
+    if message.from_user.id != ADMIN_ID: return
     total = db.get_total_invites_alltime()
-    
-    # Также получаем количество записей в таблице рефералов для сравнения
     db.cursor.execute('SELECT COUNT(*) FROM referrals')
     referrals_count = db.cursor.fetchone()[0]
-    
     await message.answer(
         f"📊 *ОБЩАЯ СТАТИСТИКА ПРИГЛАШЕНИЙ*\n\n"
         f"👥 *Всего приглашено:* `{total}` человек\n"
-        f"📝 *Записей в таблице referrals:* `{referrals_count}`\n\n"
-        f"{EMOJI['info']} Если числа совпадают - все ок!",
+        f"📝 *Записей в таблице referrals:* `{referrals_count}`",
         parse_mode="Markdown"
     )
 
@@ -1242,34 +981,29 @@ async def total_invites(message: types.Message):
 @dp.callback_query_handler(lambda c: c.data.startswith("num_"))
 async def process_number(call: types.CallbackQuery):
     user_id = call.from_user.id
+    if not await check_subscriptions(user_id):
+        await call.message.answer(
+            f"{EMOJI['guard']} *Необходимо подписаться на канал*",
+            parse_mode="Markdown",
+            reply_markup=get_subscription_keyboard()
+        )
+        await call.answer()
+        return
     number = call.data.replace("num_", "")
-    
-    # Получаем актуальные данные из БД
     account = db.get_account(number)
     if not account:
         await call.message.answer(f"{EMOJI['error']} Аккаунт не найден")
         await call.answer()
         return
-    
-    # Обновляем локальный словарь
     accounts[number] = account
-    
     if account["in_use"]:
         await call.message.answer(f"{EMOJI['error']} Этот номер уже куплен")
         await call.answer()
         return
-    
     user = get_user(user_id)
     price = calculate_stars_price(user_id)
-    
-    pending_purchases[user_id] = {
-        "number": number,
-        "price": price,
-        "use_discount": price < PRICE_STARS
-    }
-    
+    pending_purchases[user_id] = { "number": number, "price": price, "use_discount": price < PRICE_STARS }
     flag = FLAGS.get(account["country"], "🌍")
-    
     selection_text = (
         f"{flag} *{account['country_name']}*\n"
         f"📞 `{account['phone']}`\n\n"
@@ -1277,15 +1011,10 @@ async def process_number(call: types.CallbackQuery):
         f"{EMOJI['star']} *ЦЕНА:* {price} звёзд\n\n"
         f"{EMOJI['payment']} *Нажми кнопку ниже для оплаты*"
     )
-    
     if user_id == ADMIN_ID:
-        # Обновляем статус в БД
         db.update_account_status(number, user_id, in_use=True)
-        
-        # Обновляем локальный словарь
         accounts[number]["in_use"] = True
         accounts[number]["current_user"] = user_id
-        
         admin_text = (
             f"{EMOJI['crown']} *ТЕСТОВЫЙ РЕЖИМ АДМИНА*\n\n"
             f"{flag} `{account['phone']}`\n\n"
@@ -1300,51 +1029,28 @@ async def process_number(call: types.CallbackQuery):
             f"• {EMOJI['check']} Дай аккаунту 'отлежаться'\n\n"
             f"{EMOJI['code']} *Нажми кнопку, чтобы получить код:*"
         )
-        
-        await call.message.answer(
-            admin_text,
-            parse_mode="Markdown",
-            reply_markup=get_code_keyboard(number)
-        )
+        await call.message.answer(admin_text, parse_mode="Markdown", reply_markup=get_code_keyboard(number))
         await call.answer("✅ Бесплатный тест-режим активирован")
         return
-    
     keyboard = InlineKeyboardMarkup(row_width=1)
-    keyboard.add(InlineKeyboardButton(
-        f"{EMOJI['payment']} Оплатить {price}⭐", 
-        callback_data=f"pay_{number}"
-    ))
+    keyboard.add(InlineKeyboardButton(f"{EMOJI['payment']} Оплатить {price}⭐", callback_data=f"pay_{number}"))
     keyboard.add(InlineKeyboardButton("◀ Назад", callback_data="back"))
-    
     await call.message.answer(selection_text, parse_mode="Markdown", reply_markup=keyboard)
     await call.answer()
 
 @dp.callback_query_handler(lambda c: c.data.startswith("pay_"))
 async def pay_callback(call: types.CallbackQuery):
     number = call.data.replace("pay_", "")
-    
     if number not in accounts:
         await call.answer(f"{EMOJI['error']} Ошибка")
         return
-    
     account = accounts[number]
     flag = FLAGS.get(account["country"], "🌍")
-    
     user_id = call.from_user.id
     purchase = pending_purchases.get(user_id, {})
     price = purchase.get("price", PRICE_STARS)
-    
     prices = [LabeledPrice(label=f"Номер {number}", amount=price)]
-    await bot.send_invoice(
-        chat_id=user_id,
-        title=f"Оплата номера {flag}",
-        description=f"{account['phone']}",
-        payload=f"purchase_{number}",
-        provider_token="",
-        currency="XTR",
-        prices=prices
-    )
-    
+    await bot.send_invoice(chat_id=user_id, title=f"Оплата номера {flag}", description=f"{account['phone']}", payload=f"purchase_{number}", provider_token="", currency="XTR", prices=prices)
     await call.answer("💳 Счёт отправлен! Оплати через Telegram")
 
 @dp.callback_query_handler(lambda c: c.data == "back")
@@ -1361,41 +1067,27 @@ async def pre_checkout(pre_checkout_q: PreCheckoutQuery):
 @dp.message_handler(content_types=['successful_payment'])
 async def successful_payment(message: types.Message):
     user_id = message.from_user.id
-    
     if user_id == ADMIN_ID:
         await message.answer(f"{EMOJI['warning']} Вы админ, используйте бесплатный тест-режим")
         return
-    
     user = get_user(user_id)
-    
     purchase = pending_purchases.get(user_id, {})
     number = purchase.get("number", "1")
-    
-    # Получаем аккаунт из БД
     account = db.get_account(number)
     if not account:
         await message.answer(f"{EMOJI['error']} Аккаунт не найден")
         return
-    
     if account["in_use"]:
         await message.answer(f"{EMOJI['error']} Аккаунт уже используется")
         return
-    
-    # Обновляем статус в БД
     db.update_account_status(number, user_id, in_use=True)
-    
-    # Обновляем локальный словарь
     accounts[number]["in_use"] = True
     accounts[number]["current_user"] = user_id
-    
     if purchase.get("use_discount", False):
         db.use_discount(user_id)
-    
     db.add_purchase(user_id, number, account['phone'], message.successful_payment.total_amount)
-    
     flag = FLAGS.get(account["country"], "🌍")
     country_name = account.get("country_name", "этой страны")
-    
     instruction = (
         f"{EMOJI['success']} *ОПЛАЧЕНО!*\n\n"
         f"{flag} `{account['phone']}`\n\n"
@@ -1419,94 +1111,51 @@ async def successful_payment(message: types.Message):
         f"{EMOJI['support']} *Вопросы:* @dan4ezHelp\n\n"
         f"{EMOJI['code']} *Нажми кнопку, чтобы получить код:*"
     )
-    
-    await message.answer(
-        instruction,
-        parse_mode="Markdown",
-        reply_markup=get_code_keyboard(number)
-    )
-    
-    await bot.send_message(
-        ADMIN_ID,
-        f"{EMOJI['money']} Продажа!\n"
-        f"👤 ID: {user_id}\n"
-        f"📱 Номер {number}\n"
-        f"⭐ {message.successful_payment.total_amount}"
-    )
+    await message.answer(instruction, parse_mode="Markdown", reply_markup=get_code_keyboard(number))
+    await bot.send_message(ADMIN_ID, f"{EMOJI['money']} Продажа!\n👤 ID: {user_id}\n📱 Номер {number}\n⭐ {message.successful_payment.total_amount}")
 
 # ================== ПОЛУЧЕНИЕ КОДА ==================
 @dp.callback_query_handler(lambda c: c.data.startswith("getcode_"))
 async def get_code_callback(call: types.CallbackQuery):
     user_id = call.from_user.id
     number = call.data.replace("getcode_", "")
-    
     if number not in accounts:
         await call.message.answer(f"{EMOJI['error']} Аккаунт не найден")
         await call.answer()
         return
-    
     account = accounts[number]
-    
     if account["current_user"] != user_id:
         await call.message.answer(f"{EMOJI['error']} Это не ваш аккаунт")
         await call.answer()
         return
-    
     await call.message.answer(f"{EMOJI['wait']} *Ищу код для {account['phone']}...*", parse_mode="Markdown")
-    
     code_getter = CodeGetter(account['session_file'])
     code = await code_getter.get_code(account['phone'], account['api_id'], account['api_hash'])
-    
     if code:
-        await call.message.answer(
-            f"{EMOJI['code']} *Код подтверждения:*\n\n"
-            f"`{code}`\n\n"
-            f"{EMOJI['time']} *Действителен 5 минут*\n\n"
-            f"{EMOJI['key']} Введи этот код в Telegram для входа",
-            parse_mode="Markdown"
-        )
+        await call.message.answer(f"{EMOJI['code']} *Код подтверждения:*\n\n`{code}`\n\n{EMOJI['time']} *Действителен 5 минут*\n\n{EMOJI['key']} Введи этот код в Telegram для входа", parse_mode="Markdown")
     else:
-        await call.message.answer(
-            f"{EMOJI['error']} *Код не найден*\n\n"
-            f"📞 Напиши @dan4ezHelp",
-            parse_mode="Markdown"
-        )
-    
+        await call.message.answer(f"{EMOJI['error']} *Код не найден*\n\n📞 Напиши @dan4ezHelp", parse_mode="Markdown")
     await call.answer()
 
 # ================== ТЕСТ ==================
 @dp.message_handler(commands=['test'])
 async def test(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    
+    if message.from_user.id != ADMIN_ID: return
     await message.answer("🧪 *Начинаю проверку всех аккаунтов...*", parse_mode="Markdown")
-    
     results = []
     for num, acc in accounts.items():
-        if not acc["in_use"]:
-            status = "🟢 СВОБОДЕН"
-        else:
-            status = "🔴 ПРОДАН"
-        
+        status = "🟢 СВОБОДЕН" if not acc["in_use"] else "🔴 ПРОДАН"
         await message.answer(f"📱 *Номер {num}*: {acc['phone']}\nСтатус: {status}", parse_mode="Markdown")
-        
         if not acc["in_use"]:
             await message.answer(f"🔄 Проверяю номер {num}...")
             getter = CodeGetter(acc['session_file'])
-            code = await getter.get_code(
-                acc['phone'],
-                acc['api_id'],
-                acc['api_hash']
-            )
-            
+            code = await getter.get_code(acc['phone'], acc['api_id'], acc['api_hash'])
             if code:
                 await message.answer(f"✅ *Номер {num}*: Код получен - `{code}`", parse_mode="Markdown")
                 results.append(f"✅ Номер {num}: код получен")
             else:
                 await message.answer(f"❌ *Номер {num}*: Код не найден", parse_mode="Markdown")
                 results.append(f"❌ Номер {num}: код не найден")
-    
     if results:
         report = "📊 *ИТОГИ ТЕСТА:*\n\n" + "\n".join(results)
         await message.answer(report, parse_mode="Markdown")
@@ -1514,13 +1163,10 @@ async def test(message: types.Message):
 # ================== СТАТИСТИКА ==================
 @dp.message_handler(commands=['stats'])
 async def stats(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    
+    if message.from_user.id != ADMIN_ID: return
     stats = db.get_stats()
     account_stats = db.get_account_stats()
     total_invites = db.get_total_invites_alltime()
-    
     await message.answer(
         f"{EMOJI['chart']} *СТАТИСТИКА*\n\n"
         f"📱 *АККАУНТЫ:*\n"
@@ -1543,8 +1189,6 @@ def backup_database():
         if os.path.exists("data/bot.db"):
             shutil.copy2("data/bot.db", "data/bot.db.backup")
             print("✅ Создана резервная копия базы данных")
-            
-            # Также сохраняем сессии в БД
             for num in accounts:
                 session_file = f"sessions/account_{num}.session"
                 if os.path.exists(session_file):
@@ -1556,7 +1200,6 @@ def backup_database():
     except Exception as e:
         print(f"❌ Ошибка создания резервной копии: {e}")
 
-# ================== ЗАКРЫТИЕ БАЗЫ ==================
 atexit.register(backup_database)
 atexit.register(db.close)
 
@@ -1574,5 +1217,13 @@ if __name__ == '__main__':
     print("📈 Всего приглашений: /total_invites")
     print("👑 Режим админа: БЕСПЛАТНО")
     print("=" * 50)
-    
-    executor.start_polling(dp, skip_updates=True)
+    time.sleep(2)
+    while True:
+        try:
+            executor.start_polling(dp, skip_updates=True, timeout=20, relax=0.5)
+        except Exception as e:
+            print(f"❌ Ошибка: {e}")
+            print("🔄 Перезапуск через 5 секунд...")
+            time.sleep(5)
+            continue
+        break
