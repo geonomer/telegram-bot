@@ -20,6 +20,29 @@ from pyrogram import Client
 from pyrogram.errors import PhoneNumberInvalid, AuthKeyUnregistered, FloodWait
 from pyrogram.enums import ChatType
 
+# ================== РЕЖИМ ОБСЛУЖИВАНИЯ ==================
+MAINTENANCE_MODE = True  # True - бот работает ТОЛЬКО для админа, False - для всех
+MAINTENANCE_MESSAGE = "🔧 Бот временно на техобслуживании\n\n👉 Подпишитесь на канал @Geo_Nomer_Store, там выйдет анонс когда запустимся\n👨‍💻 По вопросам @dan4ezHelp"
+
+def maintenance_check(handler):
+    """Декоратор для проверки режима обслуживания"""
+    async def wrapper(message: types.Message):
+        if MAINTENANCE_MODE and message.from_user.id != ADMIN_ID:
+            await message.answer(MAINTENANCE_MESSAGE)
+            return
+        return await handler(message)
+    return wrapper
+
+def maintenance_check_callback(handler):
+    """Декоратор для callback-запросов"""
+    async def wrapper(call: types.CallbackQuery):
+        if MAINTENANCE_MODE and call.from_user.id != ADMIN_ID:
+            await call.message.answer(MAINTENANCE_MESSAGE)
+            await call.answer()
+            return
+        return await handler(call)
+    return wrapper
+
 # ================== ПРОВЕРКА И ВОССТАНОВЛЕНИЕ БАЗЫ ==================
 def fix_corrupted_db():
     """Проверяет и исправляет поврежденную базу данных"""
@@ -111,6 +134,7 @@ def restore_db_from_env():
     """Восстанавливает базу данных из переменных окружения"""
     print("\n🔍 ПРОВЕРКА БЭКАПА БАЗЫ ДАННЫХ:")
     
+    # Сначала проверяем DB_BACKUP (base64)
     db_backup = os.environ.get('DB_BACKUP')
     if db_backup:
         try:
@@ -119,11 +143,9 @@ def restore_db_from_env():
             
             # Создаем резервную копию текущей БД если есть
             if os.path.exists("data/bot.db"):
-                # Проверяем текущую БД
                 try:
                     test_conn = sqlite3.connect("data/bot.db")
                     test_conn.close()
-                    # Если все ок, делаем бэкап
                     shutil.copy2("data/bot.db", "data/bot.db.prev")
                     print("📦 Создана резервная копия текущей БД")
                 except:
@@ -132,10 +154,40 @@ def restore_db_from_env():
             with open("data/bot.db", "wb") as f:
                 f.write(db_data)
             
-            print(f"✅ База данных восстановлена из бэкапа ({len(db_data)} байт)")
+            print(f"✅ База данных восстановлена из DB_BACKUP ({len(db_data)} байт)")
             return True
         except Exception as e:
-            print(f"❌ Ошибка восстановления БД: {e}")
+            print(f"❌ Ошибка восстановления из DB_BACKUP: {e}")
+    
+    # Если нет DB_BACKUP, проверяем SQL_BACKUP (текстовый дамп)
+    sql_backup = os.environ.get('SQL_BACKUP')
+    if sql_backup:
+        try:
+            sql_backup = sql_backup.replace('\\n', '\n')
+            
+            # Создаем резервную копию текущей БД если есть
+            if os.path.exists("data/bot.db"):
+                try:
+                    test_conn = sqlite3.connect("data/bot.db")
+                    test_conn.close()
+                    shutil.copy2("data/bot.db", "data/bot.db.prev")
+                    print("📦 Создана резервная копия текущей БД")
+                except:
+                    print("⚠️ Текущая БД повреждена, будет заменена")
+            
+            # Удаляем старую базу и создаем новую из SQL дампа
+            if os.path.exists("data/bot.db"):
+                os.remove("data/bot.db")
+            
+            conn = sqlite3.connect("data/bot.db")
+            conn.executescript(sql_backup)
+            conn.commit()
+            conn.close()
+            
+            print(f"✅ База данных восстановлена из SQL_BACKUP")
+            return True
+        except Exception as e:
+            print(f"❌ Ошибка восстановления из SQL_BACKUP: {e}")
     
     print("🆕 Будет создана новая база данных")
     return False
@@ -1069,6 +1121,7 @@ def get_code_keyboard(number):
 
 # ================== КОМАНДЫ ==================
 @dp.message_handler(commands=['start'])
+@maintenance_check
 async def start(message: types.Message):
     user_id = message.from_user.id
     args = message.get_args()
@@ -1123,6 +1176,7 @@ async def start(message: types.Message):
     await message.reply(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.callback_query_handler(lambda c: c.data == "check_sub")
+@maintenance_check_callback
 async def check_sub_callback(call: types.CallbackQuery):
     user_id = call.from_user.id
     
@@ -1144,6 +1198,7 @@ async def check_sub_callback(call: types.CallbackQuery):
         await call.answer("❌ Вы еще не подписались! Подпишитесь и нажмите снова", show_alert=True)
 
 @dp.message_handler(lambda msg: msg.text == "👥 Рефералы")
+@maintenance_check
 async def referrals(msg: types.Message):
     user_id = msg.from_user.id
     
@@ -1198,6 +1253,7 @@ async def referrals(msg: types.Message):
     await msg.answer(text, parse_mode="Markdown", reply_markup=keyboard)
 
 @dp.message_handler(lambda msg: msg.text == "💰 Цены")
+@maintenance_check
 async def prices(msg: types.Message):
     user_id = msg.from_user.id
     
@@ -1220,6 +1276,7 @@ async def prices(msg: types.Message):
     await msg.answer(text, parse_mode="Markdown")
 
 @dp.message_handler(lambda msg: msg.text == "📱 Номера")
+@maintenance_check
 async def numbers(msg: types.Message):
     user_id = msg.from_user.id
     
@@ -1232,6 +1289,7 @@ async def numbers(msg: types.Message):
     await msg.answer("📱 Доступные номера:", reply_markup=get_numbers_keyboard())
 
 @dp.message_handler(lambda msg: msg.text == "📞 Поддержка")
+@maintenance_check
 async def support(msg: types.Message):
     user_id = msg.from_user.id
     
@@ -1244,6 +1302,7 @@ async def support(msg: types.Message):
     await msg.answer("📞 @dan4ezHelp")
 
 @dp.message_handler(lambda msg: msg.text == "❓ Помощь")
+@maintenance_check
 async def help_cmd(msg: types.Message):
     user_id = msg.from_user.id
     
@@ -1266,6 +1325,7 @@ async def help_cmd(msg: types.Message):
 
 # ================== АДМИН КОМАНДЫ ==================
 @dp.message_handler(commands=['addaccount'])
+@maintenance_check
 async def add_account_cmd(message: types.Message):
     """Добавляет новый аккаунт в БД (только для админа)"""
     if message.from_user.id != ADMIN_ID:
@@ -1314,6 +1374,7 @@ async def add_account_cmd(message: types.Message):
         await message.answer(f"{EMOJI['error']} Ошибка добавления аккаунта")
 
 @dp.message_handler(commands=['save_sessions'])
+@maintenance_check
 async def save_sessions_cmd(message: types.Message):
     """Сохраняет все текущие сессии в БД"""
     if message.from_user.id != ADMIN_ID:
@@ -1337,6 +1398,7 @@ async def save_sessions_cmd(message: types.Message):
     await message.answer(f"✅ Сохранено {saved} сессий в БД")
 
 @dp.message_handler(commands=['exportdb'])
+@maintenance_check
 async def export_db(message: types.Message):
     """Экспортирует всю базу данных"""
     if message.from_user.id != ADMIN_ID:
@@ -1388,6 +1450,7 @@ async def export_db(message: types.Message):
 
 # ================== ВЫБОР НОМЕРА ==================
 @dp.callback_query_handler(lambda c: c.data.startswith("num_"))
+@maintenance_check_callback
 async def process_number(call: types.CallbackQuery):
     user_id = call.from_user.id
     
@@ -1479,6 +1542,7 @@ async def process_number(call: types.CallbackQuery):
     await call.answer()
 
 @dp.callback_query_handler(lambda c: c.data.startswith("pay_"))
+@maintenance_check_callback
 async def pay_callback(call: types.CallbackQuery):
     number = call.data.replace("pay_", "")
     
@@ -1507,6 +1571,7 @@ async def pay_callback(call: types.CallbackQuery):
     await call.answer("💳 Счёт отправлен! Оплати через Telegram")
 
 @dp.callback_query_handler(lambda c: c.data == "back")
+@maintenance_check_callback
 async def back(call: types.CallbackQuery):
     await call.message.delete()
     await call.message.answer("👋 Главное меню:", reply_markup=get_main_keyboard())
@@ -1518,6 +1583,7 @@ async def pre_checkout(pre_checkout_q: PreCheckoutQuery):
     await bot.answer_pre_checkout_query(pre_checkout_q.id, ok=True)
 
 @dp.message_handler(content_types=['successful_payment'])
+@maintenance_check
 async def successful_payment(message: types.Message):
     user_id = message.from_user.id
     
@@ -1595,6 +1661,7 @@ async def successful_payment(message: types.Message):
 
 # ================== ПОЛУЧЕНИЕ КОДА ==================
 @dp.callback_query_handler(lambda c: c.data.startswith("getcode_"))
+@maintenance_check_callback
 async def get_code_callback(call: types.CallbackQuery):
     user_id = call.from_user.id
     number = call.data.replace("getcode_", "")
@@ -1635,6 +1702,7 @@ async def get_code_callback(call: types.CallbackQuery):
 
 # ================== ТЕСТ ==================
 @dp.message_handler(commands=['test'])
+@maintenance_check
 async def test(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
@@ -1672,6 +1740,7 @@ async def test(message: types.Message):
 
 # ================== СТАТИСТИКА ==================
 @dp.message_handler(commands=['stats'])
+@maintenance_check
 async def stats(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
@@ -1731,6 +1800,7 @@ if __name__ == '__main__':
     print("➕ Добавить аккаунт: /addaccount")
     print("💾 Сохранить сессии: /save_sessions")
     print("👑 Режим админа: БЕСПЛАТНО")
+    print(f"🔧 Режим обслуживания: {'ВКЛЮЧЕН (только админ)' if MAINTENANCE_MODE else 'ВЫКЛЮЧЕН'}")
     print("=" * 50)
     
     executor.start_polling(dp, skip_updates=True)
