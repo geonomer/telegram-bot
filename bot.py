@@ -924,42 +924,39 @@ def init_accounts_from_db():
     else:
         print("🆕 База данных пуста, создаем начальные аккаунты")
         
-        # УБРАЛ СТАРЫЕ АККАУНТЫ 1,2,3 - ТЕПЕРЬ ОНИ НЕ СОЗДАЮТСЯ
-        initial_accounts = {}
-        
-        # Если хочешь создать новые аккаунты по умолчанию, раскомментируй:
-        # initial_accounts = {
-        #     "4": {
-        #         "account_number": "4",
-        #         "phone": "+17312911669",
-        #         "country": "us",
-        #         "country_name": "США",
-        #         "api_id": API_ID,
-        #         "api_hash": API_HASH,
-        #         "session_file": "sessions/account_4",
-        #         "description": "Аккаунт USA, чистый, прогретый"
-        #     },
-        #     "5": {
-        #         "account_number": "5",
-        #         "phone": "+12185980032",
-        #         "country": "us",
-        #         "country_name": "США",
-        #         "api_id": API_ID,
-        #         "api_hash": API_HASH,
-        #         "session_file": "sessions/account_5",
-        #         "description": "Аккаунт USA, чистый, прогретый"
-        #     },
-        #     "6": {
-        #         "account_number": "6",
-        #         "phone": "+15187393045",
-        #         "country": "us",
-        #         "country_name": "США",
-        #         "api_id": API_ID,
-        #         "api_hash": API_HASH,
-        #         "session_file": "sessions/account_6",
-        #         "description": "Аккаунт USA, чистый, прогретый"
-        #     }
-        # }
+        # ===== НОВЫЕ АККАУНТЫ 4,5,6 (СТАРЫЕ УДАЛЕНЫ) =====
+        initial_accounts = {
+            "4": {
+                "account_number": "4",
+                "phone": "+17312911669",
+                "country": "us",
+                "country_name": "США",
+                "api_id": API_ID,
+                "api_hash": API_HASH,
+                "session_file": "sessions/account_4",
+                "description": "Аккаунт USA, чистый, прогретый"
+            },
+            "5": {
+                "account_number": "5",
+                "phone": "+12185980032",
+                "country": "us",
+                "country_name": "США",
+                "api_id": API_ID,
+                "api_hash": API_HASH,
+                "session_file": "sessions/account_5",
+                "description": "Аккаунт USA, чистый, прогретый"
+            },
+            "6": {
+                "account_number": "6",
+                "phone": "+15187393045",
+                "country": "us",
+                "country_name": "США",
+                "api_id": API_ID,
+                "api_hash": API_HASH,
+                "session_file": "sessions/account_6",
+                "description": "Аккаунт USA, чистый, прогретый"
+            }
+        }
         
         for num, acc_data in initial_accounts.items():
             db.add_account(acc_data)
