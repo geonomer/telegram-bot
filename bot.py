@@ -21,7 +21,7 @@ from pyrogram.errors import PhoneNumberInvalid, AuthKeyUnregistered, FloodWait
 from pyrogram.enums import ChatType
 
 # ================== РЕЖИМ ОБСЛУЖИВАНИЯ ==================
-MAINTENANCE_MODE = True  # True - бот работает ТОЛЬКО для админа, False - для всех
+MAINTENANCE_MODE = False  # True - бот работает ТОЛЬКО для админа, False - для всех
 MAINTENANCE_MESSAGE = "🔧 Бот временно на техобслуживании\n\n👉 Подпишитесь на канал @Geo_Nomer_Store, там выйдет анонс когда запустимся\n👨‍💻 По вопросам @dan4ezHelp"
 
 def maintenance_check(handler):
