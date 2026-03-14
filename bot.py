@@ -288,6 +288,9 @@ EMOJI = {
     "vpn": "🌐", "wait2": "⏰", "alert": "⚠️", "stats": "📊"
 }
 
+# ================== ДИСКЛЕЙМЕР (ПРЕДУПРЕЖДЕНИЕ) ==================
+DISCLAIMER = "⚠️ *ВАЖНОЕ ПРЕДУПРЕЖДЕНИЕ:*\n\nАккаунт продается только для личного использования. Запрещено использовать его для мошенничества, спама, распространения запрещенной информации, нарушения законодательства РФ и правил Telegram. Покупая аккаунт, вы принимаете полную ответственность за его использование."
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
 
@@ -921,39 +924,42 @@ def init_accounts_from_db():
     else:
         print("🆕 База данных пуста, создаем начальные аккаунты")
         
-        # Начальные данные аккаунтов
-        initial_accounts = {
-            "1": {
-                "account_number": "1",
-                "phone": "+16188550568",
-                "country": "us",
-                "country_name": "США",
-                "api_id": API_ID,
-                "api_hash": API_HASH,
-                "session_file": "sessions/account_1",
-                "description": "Аккаунт USA, чистый, прогретый"
-            },
-            "2": {
-                "account_number": "2",
-                "phone": "+15593721842",
-                "country": "us",
-                "country_name": "США",
-                "api_id": API_ID,
-                "api_hash": API_HASH,
-                "session_file": "sessions/account_2",
-                "description": "Аккаунт USA, чистый, прогретый"
-            },
-            "3": {
-                "account_number": "3",
-                "phone": "+15399999864",
-                "country": "us",
-                "country_name": "США",
-                "api_id": API_ID,
-                "api_hash": API_HASH,
-                "session_file": "sessions/account_3",
-                "description": "Аккаунт USA, чистый, прогретый"
-            }
-        }
+        # УБРАЛ СТАРЫЕ АККАУНТЫ 1,2,3 - ТЕПЕРЬ ОНИ НЕ СОЗДАЮТСЯ
+        initial_accounts = {}
+        
+        # Если хочешь создать новые аккаунты по умолчанию, раскомментируй:
+        # initial_accounts = {
+        #     "4": {
+        #         "account_number": "4",
+        #         "phone": "+17312911669",
+        #         "country": "us",
+        #         "country_name": "США",
+        #         "api_id": API_ID,
+        #         "api_hash": API_HASH,
+        #         "session_file": "sessions/account_4",
+        #         "description": "Аккаунт USA, чистый, прогретый"
+        #     },
+        #     "5": {
+        #         "account_number": "5",
+        #         "phone": "+12185980032",
+        #         "country": "us",
+        #         "country_name": "США",
+        #         "api_id": API_ID,
+        #         "api_hash": API_HASH,
+        #         "session_file": "sessions/account_5",
+        #         "description": "Аккаунт USA, чистый, прогретый"
+        #     },
+        #     "6": {
+        #         "account_number": "6",
+        #         "phone": "+15187393045",
+        #         "country": "us",
+        #         "country_name": "США",
+        #         "api_id": API_ID,
+        #         "api_hash": API_HASH,
+        #         "session_file": "sessions/account_6",
+        #         "description": "Аккаунт USA, чистый, прогретый"
+        #     }
+        # }
         
         for num, acc_data in initial_accounts.items():
             db.add_account(acc_data)
@@ -961,19 +967,6 @@ def init_accounts_from_db():
         
         # Загружаем созданные аккаунты
         accounts_from_db = db.get_all_accounts()
-        
-        # Сохраняем существующие файлы сессий в БД
-        for num in initial_accounts:
-            session_file = f"sessions/account_{num}.session"
-            if os.path.exists(session_file):
-                try:
-                    with open(session_file, 'rb') as f:
-                        session_data = f.read()
-                        session_b64 = base64.b64encode(session_data).decode('utf-8')
-                        db.save_session(num, session_b64)
-                        print(f"✅ Сохранена сессия аккаунта {num} в БД")
-                except Exception as e:
-                    print(f"❌ Ошибка сохранения сессии {num}: {e}")
         
         return accounts_from_db
 
@@ -1102,7 +1095,7 @@ def get_main_keyboard():
 def get_numbers_keyboard():
     kb = InlineKeyboardMarkup(row_width=1)
     for num, acc in accounts.items():
-        if not acc["in_use"]:
+        if not acc["in_use"]:  # ПОКАЗЫВАЕМ ТОЛЬКО СВОБОДНЫЕ
             flag = FLAGS.get(acc["country"], "🌍")
             kb.add(InlineKeyboardButton(
                 f"{flag} {acc['phone']} — {acc['description'][:20]}...", 
@@ -1266,11 +1259,17 @@ async def prices(msg: types.Message):
     price = calculate_stars_price(user_id)
     
     text = f"{EMOJI['money']} *Доступные номера:*\n\n"
-    for num, acc in accounts.items():
-        flag = FLAGS.get(acc["country"], "🌍")
-        status = f"{EMOJI['unlock']}" if not acc["in_use"] else f"{EMOJI['lock']}"
-        text += f"{flag} `{acc['phone']}` {status}\n"
-        text += f"{EMOJI['info']} *{acc['description']}*\n\n"
+    
+    # ПОКАЗЫВАЕМ ТОЛЬКО СВОБОДНЫЕ АККАУНТЫ
+    available_accounts = {num: acc for num, acc in accounts.items() if not acc["in_use"]}
+    
+    if not available_accounts:
+        text += "😔 В данный момент нет свободных номеров. Попробуйте позже!"
+    else:
+        for num, acc in available_accounts.items():
+            flag = FLAGS.get(acc["country"], "🌍")
+            text += f"{flag} `{acc['phone']}`\n"
+            text += f"{EMOJI['info']} *{acc['description']}*\n\n"
     
     text += f"\n{EMOJI['star']} *Твоя цена:* {price} звёзд"
     await msg.answer(text, parse_mode="Markdown")
@@ -1497,7 +1496,8 @@ async def process_number(call: types.CallbackQuery):
         f"📞 `{account['phone']}`\n\n"
         f"{EMOJI['info']} *ОПИСАНИЕ:*\n{account['description']}\n\n"
         f"{EMOJI['star']} *ЦЕНА:* {price} звёзд\n\n"
-        f"{EMOJI['payment']} *Нажми кнопку ниже для оплаты*"
+        f"{EMOJI['payment']} *Нажми кнопку ниже для оплаты*\n\n"
+        f"{DISCLAIMER}"  # ДОБАВЛЯЕМ ДИСКЛЕЙМЕР
     )
     
     if user_id == ADMIN_ID:
@@ -1624,6 +1624,7 @@ async def successful_payment(message: types.Message):
     instruction = (
         f"{EMOJI['success']} *ОПЛАЧЕНО!*\n\n"
         f"{flag} `{account['phone']}`\n\n"
+        f"{DISCLAIMER}\n\n"  # ДОБАВЛЯЕМ ДИСКЛЕЙМЕР
         f"{EMOJI['key']} *ИНСТРУКЦИЯ ПО ВХОДУ:*\n"
         f"1️⃣ {EMOJI['vpn']} *ВКЛЮЧИ ВПН СТРАНЫ* ({country_name})\n"
         f"2️⃣ Открой Telegram и введи номер выше\n"
